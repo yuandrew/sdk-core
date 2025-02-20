@@ -566,6 +566,7 @@ impl Worker {
 
     /// Will shutdown the worker. Does not resolve until all outstanding workflow tasks have been
     /// completed
+    // TODO:
     async fn shutdown(&self) {
         self.initiate_shutdown();
         if let Some(name) = self.workflows.get_sticky_queue_name() {

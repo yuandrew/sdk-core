@@ -467,6 +467,10 @@ impl TestWorker {
         });
     }
 
+    // pub async fn shutdown(&self) {
+    //     self.core_worker.shutdown().await
+    // }
+
     /// Runs until all expected workflows have completed and then shuts down the worker
     pub async fn run_until_done(&mut self) -> Result<(), anyhow::Error> {
         self.run_until_done_intercepted(Option::<TestWorkerCompletionIceptor>::None)
