@@ -154,7 +154,7 @@ async fn local_activity_stop_follow_up() {
     worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
         println!("[WF] started");
         let local_activity = ctx.local_activity(LocalActivityOptions {
-            start_to_close_timeout: Some(Duration::from_secs(10)),
+            schedule_to_close_timeout: Some(Duration::from_secs(10)),
             activity_type: "stop_activity".to_string(),
             input: "hi!".as_json_payload().expect("serializes fine"),
             ..Default::default()
@@ -164,7 +164,7 @@ async fn local_activity_stop_follow_up() {
 
         println!("[WF] second started");
         let local_activity = ctx.local_activity(LocalActivityOptions {
-            start_to_close_timeout: Some(Duration::from_secs(10)),
+            schedule_to_close_timeout: Some(Duration::from_secs(10)),
             activity_type: "stop_activity".to_string(),
             input: "bye!".as_json_payload().expect("serializes fine"),
             ..Default::default()
@@ -228,7 +228,7 @@ async fn local_activity_stop_follow_up() {
     for event in history.events.iter() {
         println!("[event] {:?}", event)
     }
-    // assert!(false)
+    assert!(false)
 }
 
 #[tokio::test]
