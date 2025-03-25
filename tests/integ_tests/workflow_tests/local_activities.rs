@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
-use temporal_client::{WfClientExt, WorkflowOptions};
+use temporal_client::{WfClientExt, WorkflowClientTrait, WorkflowOptions};
 use temporal_sdk::{
     interceptors::WorkerInterceptor, ActContext, ActivityError, ActivityOptions, CancellableFuture,
     LocalActivityOptions, WfContext, WorkflowResult,
@@ -25,6 +25,8 @@ use temporal_sdk_core_test_utils::{
     history_from_proto_binary, replay_sdk_worker, workflows::la_problem_workflow, CoreWfStarter,
     WorkflowHandleExt,
 };
+use tokio::join;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn one_local_activity_wf(ctx: WfContext) -> WorkflowResult<()> {
@@ -54,6 +56,266 @@ async fn one_local_activity() {
         .fetch_history_and_replay(worker.inner_mut())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn local_activity_worker_stop_task_timeout() {
+    let wf_name = "local_activity_worker_stop_task_timeout";
+    let mut starter = CoreWfStarter::new(wf_name);
+    starter
+        .worker_config
+        .graceful_shutdown_period(Duration::from_secs(10)); // WorkerStopTimeout
+    let mut worker = starter.worker().await;
+    static ACTS_STARTED: Semaphore = Semaphore::const_new(0);
+    static ACTS_DONE: Semaphore = Semaphore::const_new(0);
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        println!("[WF] started");
+
+        while ACTS_DONE.available_permits() == 0 {
+            let local_activity = ctx.local_activity(LocalActivityOptions {
+                start_to_close_timeout: Some(Duration::from_secs(60)),
+                activity_type: "stop_activity".to_string(),
+                input: "hi!".as_json_payload().expect("serializes fine"),
+                ..Default::default()
+            });
+            println!("[WF] LA started");
+            local_activity.await;
+        }
+        Ok(().into())
+    });
+
+    worker.register_activity(
+        "stop_activity",
+        |_ctx: ActContext, echo_me: String| async move {
+            println!("[LA] started");
+            ACTS_STARTED.add_permits(1);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            println!("[LA] completed");
+            Ok(echo_me)
+        },
+    );
+
+    println!("calling starter.start_with_worker");
+
+    let run_id = worker
+        .submit_wf(
+            wf_name.to_owned(),
+            wf_name.to_owned(),
+            vec![],
+            WorkflowOptions {
+                execution_timeout: Some(Duration::from_secs(15)),
+                task_timeout: Some(Duration::from_secs(2)),
+                // enable_eager_workflow_start: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // tokio::time::sleep(Duration::from_millis(500)).await;
+
+    println!("does run_until_done wait until workflow is done running?");
+
+    let handle = worker.inner_mut().shutdown_handle();
+    let shutdowner = async {
+        let _ = ACTS_STARTED.acquire().await;
+        // worker.inner_mut().shutdown().await;
+        println!("Shutdown initiated");
+        handle();
+        // tokio::time::sleep(Duration::from_secs(2)).await;
+        ACTS_DONE.add_permits(1);
+        println!("ACTS_DONE permit added");
+    };
+    let runner = async {
+        worker.run_until_done().await.unwrap();
+    };
+    join!(shutdowner, runner);
+
+    let client = starter.get_client().await;
+    let history = client
+        .get_workflow_execution_history(wf_name.to_owned(), Some(run_id), vec![])
+        .await
+        .unwrap()
+        .history
+        .unwrap();
+    println!("\nHistory");
+    for event in history.events.iter() {
+        println!("[event] {:?}", event)
+    }
+    // assert!(false)
+}
+
+#[tokio::test]
+async fn local_activity_stop_follow_up() {
+    let wf_name = "local_activity_stop_follow_up";
+    let mut starter = CoreWfStarter::new(wf_name);
+    let mut worker = starter.worker().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        println!("[WF] started");
+        let local_activity = ctx.local_activity(LocalActivityOptions {
+            start_to_close_timeout: Some(Duration::from_secs(10)),
+            activity_type: "stop_activity".to_string(),
+            input: "hi!".as_json_payload().expect("serializes fine"),
+            ..Default::default()
+        });
+        println!("[WF] LA started");
+        local_activity.await;
+
+        println!("[WF] second started");
+        let local_activity = ctx.local_activity(LocalActivityOptions {
+            start_to_close_timeout: Some(Duration::from_secs(10)),
+            activity_type: "stop_activity".to_string(),
+            input: "bye!".as_json_payload().expect("serializes fine"),
+            ..Default::default()
+        });
+        println!("[WF] second LA started");
+        local_activity.await;
+
+        Ok(().into())
+    });
+
+    worker.register_activity(
+        "stop_activity",
+        |_ctx: ActContext, echo_me: String| async move {
+            println!("[LA] started");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            println!("[LA] completed");
+            Result::<(), _>::Err(anyhow!("Oh no I failed!").into())
+        },
+    );
+
+    println!("calling starter.start_with_worker");
+
+    let run_id = worker
+        .submit_wf(
+            wf_name.to_owned(),
+            wf_name.to_owned(),
+            vec![],
+            WorkflowOptions {
+                execution_timeout: Some(Duration::from_secs(15)),
+                task_timeout: Some(Duration::from_secs(2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    println!("does run_until_done wait until workflow is done running?");
+
+    let handle = worker.inner_mut().shutdown_handle();
+    let shutdowner = async {
+        // worker.inner_mut().shutdown().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        println!("Shutdown initiated");
+        handle();
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    };
+    let runner = async {
+        worker.run_until_done().await.unwrap();
+    };
+    join!(shutdowner, runner);
+
+    let client = starter.get_client().await;
+    let history = client
+        .get_workflow_execution_history(wf_name.to_owned(), Some(run_id), vec![])
+        .await
+        .unwrap()
+        .history
+        .unwrap();
+    println!("\nHistory");
+    for event in history.events.iter() {
+        println!("[event] {:?}", event)
+    }
+    // assert!(false)
+}
+
+#[tokio::test]
+async fn activity_cancel_worker_stop() {
+    let wf_name = "activity_cancel_worker_stop";
+    let mut starter = CoreWfStarter::new(wf_name);
+    starter
+        .worker_config
+        .graceful_shutdown_period(Duration::from_secs(10)); // WorkerStopTimeout
+    let mut worker = starter.worker().await;
+    static ACTS_STARTED: Semaphore = Semaphore::const_new(0);
+    static ACTS_DONE: Semaphore = Semaphore::const_new(0);
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        println!("[WF] started");
+
+        while ACTS_DONE.available_permits() == 0 {
+            let local_activity = ctx.local_activity(LocalActivityOptions {
+                start_to_close_timeout: Some(Duration::from_secs(60)),
+                activity_type: "stop_activity".to_string(),
+                input: "hi!".as_json_payload().expect("serializes fine"),
+                ..Default::default()
+            });
+            println!("[WF] LA started");
+            local_activity.await;
+        }
+        Ok(().into())
+    });
+
+    worker.register_activity(
+        "stop_activity",
+        |_ctx: ActContext, echo_me: String| async move {
+            println!("[LA] started");
+            ACTS_STARTED.add_permits(1);
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            println!("[LA] completed");
+            Ok(echo_me)
+        },
+    );
+
+    println!("calling starter.start_with_worker");
+
+    let run_id = worker
+        .submit_wf(
+            wf_name.to_owned(),
+            wf_name.to_owned(),
+            vec![],
+            WorkflowOptions {
+                execution_timeout: Some(Duration::from_secs(15)),
+                task_timeout: Some(Duration::from_secs(2)),
+                // enable_eager_workflow_start: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // tokio::time::sleep(Duration::from_millis(500)).await;
+
+    println!("does run_until_done wait until workflow is done running?");
+
+    let handle = worker.inner_mut().shutdown_handle();
+    let shutdowner = async {
+        let _ = ACTS_STARTED.acquire().await;
+        // worker.inner_mut().shutdown().await;
+        println!("Shutdown initiated");
+        handle();
+        // tokio::time::sleep(Duration::from_secs(2)).await;
+        ACTS_DONE.add_permits(1);
+        println!("ACTS_DONE permit added");
+    };
+    let runner = async {
+        worker.run_until_done().await.unwrap();
+    };
+    join!(shutdowner, runner);
+
+    let client = starter.get_client().await;
+    let history = client
+        .get_workflow_execution_history(wf_name.to_owned(), Some(run_id), vec![])
+        .await
+        .unwrap()
+        .history
+        .unwrap();
+    println!("\nHistory");
+    for event in history.events.iter() {
+        println!("[event] {:?}", event)
+    }
+    // assert!(false)
 }
 
 pub(crate) async fn local_act_concurrent_with_timer_wf(ctx: WfContext) -> WorkflowResult<()> {
