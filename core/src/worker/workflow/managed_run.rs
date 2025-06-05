@@ -1,23 +1,23 @@
 use crate::{
-    MetricsContext,
     abstractions::dbg_panic,
     internal_flags::CoreInternalFlags,
-    protosext::{WorkflowActivationExt, protocol_messages::IncomingProtocolMessage},
+    protosext::{protocol_messages::IncomingProtocolMessage, WorkflowActivationExt},
     telemetry::metrics,
     worker::{
-        LEGACY_QUERY_ID, LocalActRequest,
         workflow::{
-            ActivationAction, ActivationCompleteOutcome, ActivationCompleteResult,
-            ActivationOrAuto, BufferedTasks, DrivenWorkflow, EvictionRequestResult,
-            FailedActivationWFTReport, HeartbeatTimeoutMsg, HistoryUpdate,
-            LocalActivityRequestSink, LocalResolution, NextPageReq, OutstandingActivation,
-            OutstandingTask, PermittedWFT, RequestEvictMsg, RunBasics,
-            ServerCommandsWithWorkflowInfo, WFCommand, WFCommandVariant, WFMachinesError,
-            WFT_HEARTBEAT_TIMEOUT_FRACTION, WFTReportStatus, WorkflowTaskInfo,
-            history_update::HistoryPaginator,
-            machines::{MachinesWFTResponseContent, WorkflowMachines},
-        },
+            history_update::HistoryPaginator, machines::{MachinesWFTResponseContent, WorkflowMachines}, ActivationAction,
+            ActivationCompleteOutcome, ActivationCompleteResult, ActivationOrAuto, BufferedTasks,
+            DrivenWorkflow, EvictionRequestResult, FailedActivationWFTReport,
+            HeartbeatTimeoutMsg, HistoryUpdate, LocalActivityRequestSink, LocalResolution,
+            NextPageReq, OutstandingActivation, OutstandingTask, PermittedWFT,
+            RequestEvictMsg, RunBasics, ServerCommandsWithWorkflowInfo, WFCommand,
+            WFCommandVariant, WFMachinesError, WFTReportStatus,
+            WorkflowTaskInfo,
+            WFT_HEARTBEAT_TIMEOUT_FRACTION,
+        }, LocalActRequest,
+        LEGACY_QUERY_ID,
     },
+    MetricsContext,
 };
 use futures_util::future::AbortHandle;
 use std::{
@@ -25,16 +25,15 @@ use std::{
     mem,
     ops::{Add, Sub},
     rc::Rc,
-    sync::{Arc, mpsc::Sender},
+    sync::{mpsc::Sender, Arc},
     time::{Duration, Instant},
 };
 use temporal_sdk_core_api::{errors::WorkflowErrorType, worker::WorkerConfig};
 use temporal_sdk_core_protos::{
-    TaskToken,
     coresdk::{
         workflow_activation::{
-            WorkflowActivation, create_evict_activation, query_to_job,
-            remove_from_cache::EvictionReason, workflow_activation_job,
+            create_evict_activation, query_to_job, remove_from_cache::EvictionReason,
+            workflow_activation_job, WorkflowActivation,
         },
         workflow_commands::{FailWorkflowExecution, QueryResult},
         workflow_completion,
@@ -44,6 +43,7 @@ use temporal_sdk_core_protos::{
         enums::v1::{VersioningBehavior, WorkflowTaskFailedCause},
         failure::v1::Failure,
     },
+    TaskToken,
 };
 use tokio::sync::oneshot;
 use tracing::Span;
@@ -809,6 +809,7 @@ impl ManagedRun {
     /// in [completion] again, at which point we'll start a new heartbeat timeout, which will
     /// immediately trigger and thus finish the completion, forcing a new task as it should.
     fn _heartbeat_timeout(&mut self) -> bool {
+        println!("_heartbeat timeout");
         if let Some(ref mut wait_dat) = self.waiting_on_la {
             // Cancel the heartbeat timeout
             wait_dat.hb_timeout_handle.abort();
@@ -1313,6 +1314,7 @@ fn sink_heartbeat_timeout_start(
     wft_timeout: Duration,
 ) -> AbortHandle {
     // The heartbeat deadline is 80% of the WFT timeout
+    // HERE
     let deadline = wft_start_time.add(wft_timeout.mul_f32(WFT_HEARTBEAT_TIMEOUT_FRACTION));
     let (abort_handle, abort_reg) = AbortHandle::new_pair();
     sink.sink_reqs(vec![LocalActRequest::StartHeartbeatTimeout {
@@ -1519,7 +1521,7 @@ impl From<WFMachinesError> for RunUpdateErr {
 #[cfg(test)]
 mod tests {
     use crate::worker::workflow::{WFCommand, WFCommandVariant};
-    use std::mem::{Discriminant, discriminant};
+    use std::mem::{discriminant, Discriminant};
 
     use command_utils::*;
 

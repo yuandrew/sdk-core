@@ -19,14 +19,16 @@ use temporal_sdk_core::replay::HistoryForReplay;
 use temporal_sdk_core_protos::{
     TestHistoryBuilder,
     coresdk::{
-        AsJsonPayloadExt, IntoPayloadsExt,
+        AsJsonPayloadExt,
+        IntoPayloadsExt,
+        // workflow_activation::history_event,
         workflow_commands::{ActivityCancellationType, workflow_command::Variant},
         workflow_completion,
         workflow_completion::{WorkflowActivationCompletion, workflow_activation_completion},
     },
     temporal::api::{
         common::v1::RetryPolicy,
-        enums::v1::{TimeoutType, UpdateWorkflowExecutionLifecycleStage},
+        enums::v1::{EventType, TimeoutType, UpdateWorkflowExecutionLifecycleStage},
         update::v1::WaitPolicy,
     },
 };
@@ -143,6 +145,276 @@ pub(crate) async fn local_act_fanout_wf(ctx: WfContext) -> WorkflowResult<()> {
     ctx.timer(Duration::from_secs(1)).await;
     join_all(las).await;
     Ok(().into())
+}
+
+#[tokio::test]
+async fn local_activity_shutdown_during_execution() {
+    let wf_name = "local_activity_shutdown_during_execution";
+    let mut starter = CoreWfStarter::new(wf_name);
+    starter.workflow_options.task_timeout = Some(Duration::from_secs(1));
+    starter.workflow_options.execution_timeout = Some(Duration::from_secs(5));
+    let mut worker = starter.worker().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.local_activity(LocalActivityOptions {
+            activity_type: "delay".to_string(),
+            schedule_to_close_timeout: Some(Duration::from_secs(5)),
+            input: "hi".as_json_payload().expect("serializes fine"),
+            ..Default::default()
+        })
+        .await;
+        Ok(().into())
+    });
+    worker.register_activity("delay", |_: ActContext, _: String| async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        Ok(())
+    });
+
+    let _handle = starter.start_with_worker(wf_name, &mut worker).await;
+
+    // Get the core worker to initiate shutdown
+    let core_worker = starter.get_worker().await;
+
+    // Create two futures:
+    // 1. One that initiates shutdown after 2 seconds
+    // 2. One that runs the worker
+    let shutdowner = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        println!("Initiating shutdown");
+        core_worker.initiate_shutdown();
+    };
+
+    let runner = async {
+        println!("Starting worker run");
+        worker.inner_mut().run().await.unwrap();
+    };
+
+    // Run both futures concurrently
+    tokio::join!(shutdowner, runner);
+
+    let history = starter.get_history().await;
+    println!("History length: {}", history.events.len());
+    panic!("asdf");
+
+    // Verify no workflow task timeouts occurred
+    let any_task_timeouts = history
+        .events
+        .iter()
+        .any(|e| e.event_type() == EventType::WorkflowTaskTimedOut);
+    assert!(!any_task_timeouts);
+}
+
+// codex
+#[tokio::test]
+async fn local_activity_longer_than_task_timeout_heartbeats() {
+    let wf_name = "local_activity_longer_than_task_timeout_heartbeats";
+    let mut starter = CoreWfStarter::new(wf_name);
+    starter
+        .worker_config
+        .graceful_shutdown_period(Some(Duration::from_millis(1)));
+    starter.workflow_options.task_timeout = Some(Duration::from_secs(1));
+    starter.workflow_options.execution_timeout = Some(Duration::from_secs(5));
+    let mut worker = starter.worker().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.local_activity(LocalActivityOptions {
+            activity_type: "delay".to_string(),
+            schedule_to_close_timeout: Some(Duration::from_secs(5)),
+            start_to_close_timeout: Some(Duration::from_secs(4)),
+            input: "hi".as_json_payload().expect("serializes fine"),
+            retry_policy: RetryPolicy {
+                initial_interval: Some(prost_dur!(from_millis(100))),
+                backoff_coefficient: 1_000.,
+                maximum_interval: Some(prost_dur!(from_millis(1000))),
+                maximum_attempts: 1,
+                non_retryable_error_types: vec![],
+            },
+            ..Default::default()
+        })
+        .await;
+        println!("Local activity done");
+        Ok(().into())
+    });
+    worker.register_activity("delay", |_: ActContext, _: String| async {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        println!("Delay done");
+        Ok(())
+    });
+
+    starter.start_with_worker(wf_name, &mut worker).await;
+
+    // Get the core worker to initiate shutdown
+    let core_worker = starter.get_worker().await;
+
+    // Create two futures:
+    // 1. One that initiates shutdown after 2 seconds
+    // 2. One that runs the worker
+    let shutdowner = async {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        println!("Initiating shutdown");
+        core_worker.initiate_shutdown();
+        // println!("Shutdown done");
+    };
+    let runner = async {
+        worker.inner_mut().run().await.unwrap();
+        println!("Runner done");
+    };
+
+    tokio::join!(shutdowner, runner);
+
+    // tokio::time::sleep(Duration::from_secs(4)).await;
+
+    let history = starter.get_history().await;
+
+    println!("history len {}", history.events.len());
+    // for e in history.events {
+    //     println!("{:#?}", e);
+    // }
+
+    let any_task_timeouts = history
+        .events
+        .iter()
+        .any(|e| e.event_type() == EventType::WorkflowTaskTimedOut);
+    assert!(!any_task_timeouts);
+    panic!("fail so ican see prints");
+}
+
+#[tokio::test]
+async fn local_activity_longer_than_task_timeout_heartbeats_no_shutdown() {
+    let wf_name = "local_activity_longer_than_task_timeout_heartbeats";
+    let mut starter = CoreWfStarter::new(wf_name);
+    starter.workflow_options.task_timeout = Some(Duration::from_secs(1));
+    let mut worker = starter.worker().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.local_activity(LocalActivityOptions {
+            activity_type: "delay".to_string(),
+            input: "hi".as_json_payload().expect("serializes fine"),
+            ..Default::default()
+        })
+        .await;
+        Ok(().into())
+    });
+    worker.register_activity("delay", |_: ActContext, _: String| async {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        Ok(())
+    });
+
+    let _handle = starter.start_with_worker(wf_name, &mut worker).await;
+
+    // tokio::time::sleep(Duration::from_secs(4)).await;
+
+    // no shutdown
+    worker.run_until_done().await.unwrap();
+
+    let history = starter.get_history().await;
+
+    println!("history len {}", history.events.len());
+    // for e in history.events {
+    //     println!("{:#?}", e);
+    // }
+
+    let any_task_timeouts = history
+        .events
+        .iter()
+        .any(|e| e.event_type() == EventType::WorkflowTaskTimedOut);
+    assert!(!any_task_timeouts);
+    panic!("fail so ican see prints");
+}
+
+#[tokio::test]
+async fn local_activity_timeout_marker() {
+    let wf_name = "local_activity_timeout_marker";
+    let mut starter = CoreWfStarter::new(wf_name);
+    //starter
+    //  .worker_config?
+    // .graceful_shutdown_period(Some(Duration::from_millis(3000)));
+    starter.workflow_options.task_timeout = Some(Duration::from_secs(1));
+    let mut worker = starter.worker().await;
+
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.local_activity(LocalActivityOptions {
+            activity_type: "stop_activity".to_string(),
+            input: "hi!".as_json_payload().expect("serializes fine"),
+            ..Default::default()
+        })
+        .await;
+        Ok(().into())
+    });
+
+    worker.register_activity("stop_activity", |_ctx: ActContext, _: String| async move {
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+        Result::<(), _>::Ok(())
+    });
+
+    let run_id = worker
+        .submit_wf(
+            wf_name.to_owned(),
+            wf_name.to_owned(),
+            vec![],
+            WorkflowOptions {
+                task_timeout: Some(Duration::from_secs(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // no shutdown
+    // worker.run_until_done().await.unwrap();
+    let core_worker = starter.get_worker().await;
+
+    // shutdown
+    // let handle = worker.inner_mut().shutdown_handle();
+    let shutdowner = async {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        println!("shutting down");
+        core_worker.initiate_shutdown();
+    };
+    let runner = async {
+        println!("running workflow");
+        worker.inner_mut().run().await.unwrap();
+    };
+
+    tokio::join!(shutdowner, runner);
+    panic!("fail so ican see prints");
+
+    let client = starter.get_client().await;
+    let history = client
+        .get_workflow_execution_history(wf_name.to_owned(), Some(run_id), vec![])
+        .await
+        .unwrap()
+        .history
+        .unwrap();
+
+    // println!("{:#?}", history.events);
+    println!("history len {}", history.events.len());
+
+    for e in history.events {
+        println!("{:#?}", e);
+    }
+
+    panic!("fail so ican see prints");
+
+    // let marker = history
+    //     .events
+    //     .iter()
+    //     .find(|he| he.event_type() == EventType::MarkerRecorded)
+    //     .expect("expected marker recorded event");
+    //
+    // if let Some(history_event::Attributes::MarkerRecordedEventAttributes(attr)) =
+    //     marker.clone().attributes
+    // {
+    //     let failure = attr.failure.unwrap().failure_info.unwrap();
+    //     match failure {
+    //         temporal_sdk_core_protos::temporal::api::failure::v1::failure::FailureInfo::TimeoutFailureInfo(failure) => {
+    //             assert_eq!(failure.timeout_type(), TimeoutType::ScheduleToClose);
+    //         }
+    //         _ => panic!("Expected a timeout failure"),
+    //     }
+    // } else {
+    //     unreachable!("We already assert MarkerRecorded event type");
+    // }
 }
 
 #[tokio::test]
@@ -372,6 +644,22 @@ async fn cancel_after_act_starts(
         .await
         .unwrap();
     starter.shutdown().await;
+    // let client = starter.get_client().await;
+    // let history = client
+    //     .get_workflow_execution_history(wf_name.to_owned(), Some(run_id), vec![])
+    //     .await
+    //     .unwrap()
+    //     .history
+    //     .unwrap();
+
+    // // println!("{:#?}", history.events);
+    // println!("history len {}", history.events.len());
+
+    // for e in history.events {
+    //     println!("{:#?}", e);
+    // }
+
+    panic!("fail so ican see prints");
 }
 
 #[rstest::rstest]

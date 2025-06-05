@@ -340,7 +340,9 @@ impl LocalActivityManager {
                     let chan = self.heartbeat_timeout_tx.clone();
                     tokio::spawn(future::Abortable::new(
                         async move {
+                            println!("[heartbeat]");
                             tokio::time::sleep_until(deadline.into()).await;
+                            println!("[heartbeat] timerdone");
                             let _ = chan.send(send_on_elapse);
                         },
                         abort_reg,
