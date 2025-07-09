@@ -6,7 +6,7 @@ use temporal_sdk::{
     ActContext, ActivityError, ActivityOptions, LocalActivityOptions, WfContext, WorkflowResult,
 };
 use temporal_sdk_core_protos::coresdk::{AsJsonPayloadExt, FromJsonPayloadExt, IntoPayloadsExt};
-use temporal_sdk_core_test_utils::CoreWfStarter;
+use temporal_sdk_core_test_utils::{CoreWfStarter, advance_time};
 use tokio_util::sync::CancellationToken;
 
 const FUZZY_SIG: &str = "fuzzy_sig";
@@ -124,7 +124,7 @@ async fn fuzzy_workflow() {
                 .forward(sink::drain())
                 .await
                 .expect("Sending signals works");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            advance_time(Duration::from_secs(1)).await;
         }
     };
     let (r1, _) = tokio::join!(worker.run_until_done(), sig_sender);

@@ -702,6 +702,7 @@ mod tests {
     use futures_util::FutureExt;
     use std::time::Duration;
     use tokio::select;
+    use crate::test_help::advance_time;
 
     #[tokio::test]
     async fn only_polls_once_with_1_poller() {
@@ -711,7 +712,7 @@ mod tests {
             .times(2)
             .returning(move |_, _| {
                 async {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    advance_time(Duration::from_millis(300)).await;
                     Ok(Default::default())
                 }
                 .boxed()
@@ -735,7 +736,7 @@ mod tests {
         let mut last_val = false;
         for _ in 0..10 {
             select! {
-                _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                _ = advance_time(Duration::from_millis(1)) => {
                     last_val = true;
                 }
                 _ = pb.poll() => {

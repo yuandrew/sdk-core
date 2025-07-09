@@ -30,10 +30,7 @@ use temporal_sdk_core_protos::{
         update::v1::WaitPolicy,
     },
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, WorkflowHandleExt, history_from_proto_binary, init_core_replay_preloaded,
-    replay_sdk_worker, workflows::la_problem_workflow,
-};
+use temporal_sdk_core_test_utils::{CoreWfStarter, WorkflowHandleExt, history_from_proto_binary, init_core_replay_preloaded, replay_sdk_worker, workflows::la_problem_workflow, advance_time};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn one_local_activity_wf(ctx: WfContext) -> WorkflowResult<()> {
@@ -120,7 +117,7 @@ async fn long_running_local_act_with_timer() {
     let mut worker = starter.worker().await;
     worker.register_wf(wf_name.to_owned(), local_act_then_timer_then_wait);
     worker.register_activity("echo_activity", |_ctx: ActContext, str: String| async {
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        advance_time(Duration::from_secs(4)).await;
         Ok(str)
     });
 
@@ -237,7 +234,7 @@ async fn cancel_immediate(#[case] cancel_type: ActivityCancellationType) {
         let manual_cancel_act = manual_cancel_act.clone();
         async move {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(10)) => {},
+                _ = advance_time(Duration::from_secs(10)) => {},
                 _ = ctx.cancelled() => {
                     return Err(ActivityError::cancelled())
                 }
@@ -348,7 +345,7 @@ async fn cancel_after_act_starts(
                 return Err(anyhow!("Oh no I failed!").into());
             } else {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(100)) => {},
+                    _ = advance_time(Duration::from_secs(100)) => {},
                     _ = ctx.cancelled() => {
                         return Err(ActivityError::cancelled())
                     }
@@ -419,7 +416,7 @@ async fn x_to_close_timeout(#[case] is_schedule: bool) {
     });
     worker.register_activity("echo", |ctx: ActContext, _: String| async move {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(100)) => {},
+            _ = advance_time(Duration::from_secs(100)) => {},
             _ = ctx.cancelled() => {
                 return Err(ActivityError::cancelled())
             }
@@ -487,7 +484,7 @@ async fn eviction_wont_make_local_act_get_dropped(#[values(true, false)] short_w
     let mut worker = starter.worker().await;
     worker.register_wf(wf_name.to_owned(), local_act_then_timer_then_wait);
     worker.register_activity("echo_activity", |_ctx: ActContext, str: String| async {
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        advance_time(Duration::from_secs(4)).await;
         Ok(str)
     });
 
@@ -583,7 +580,7 @@ async fn repro_nondeterminism_with_timer_bug() {
         Ok(().into())
     });
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        advance_time(Duration::from_secs(2)).await;
         Ok(())
     });
 
@@ -628,7 +625,7 @@ async fn weird_la_nondeterminism_repro(#[values(true, false)] fix_hist: bool) {
         la_problem_workflow,
     );
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        advance_time(Duration::from_secs(15)).await;
         Ok(())
     });
     worker.run().await.unwrap();
@@ -653,7 +650,7 @@ async fn second_weird_la_nondeterminism_repro() {
         la_problem_workflow,
     );
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        advance_time(Duration::from_secs(15)).await;
         Ok(())
     });
     worker.run().await.unwrap();
@@ -676,7 +673,7 @@ async fn third_weird_la_nondeterminism_repro() {
         la_problem_workflow,
     );
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        advance_time(Duration::from_secs(15)).await;
         Ok(())
     });
     worker.run().await.unwrap();
@@ -734,7 +731,7 @@ async fn la_resolve_same_time_as_other_cancel() {
     });
     worker.register_activity("delay", |ctx: ActContext, wait_time: u64| async move {
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(wait_time)) => {}
+            _ = advance_time(Duration::from_millis(wait_time)) => {}
             _ = ctx.cancelled() => {}
         }
         Ok(())
@@ -804,7 +801,7 @@ async fn long_local_activity_with_update(
         Ok(().into())
     });
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        advance_time(Duration::from_secs(6)).await;
         Ok(())
     });
 
@@ -815,7 +812,7 @@ async fn long_local_activity_with_update(
     let wf_id = starter.get_task_queue().to_string();
     let update = async {
         loop {
-            tokio::time::sleep(Duration::from_millis(update_interval_ms)).await;
+            advance_time(Duration::from_millis(update_interval_ms)).await;
             let _ = client
                 .update_workflow_execution(
                     wf_id.clone(),
@@ -891,7 +888,7 @@ async fn local_activity_with_heartbeat_only_causes_one_wakeup() {
         Ok(().into())
     });
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(6)).await;
+        advance_time(Duration::from_secs(6)).await;
         Ok(())
     });
 

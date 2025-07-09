@@ -2,7 +2,7 @@ use std::time::Duration;
 use temporal_client::WorkflowClientTrait;
 use temporal_sdk::{WfContext, WfExitValue, WorkflowResult};
 use temporal_sdk_core_protos::temporal::api::enums::v1::WorkflowExecutionStatus;
-use temporal_sdk_core_test_utils::CoreWfStarter;
+use temporal_sdk_core_test_utils::{advance_time, CoreWfStarter};
 
 async fn cancelled_wf(ctx: WfContext) -> WorkflowResult<()> {
     let mut reason = "".to_string();
@@ -35,7 +35,7 @@ async fn cancel_during_timer() {
     let wf_id = starter.get_task_queue().to_string();
 
     let canceller = async {
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        advance_time(Duration::from_millis(500)).await;
         // Cancel the workflow externally
         client
             .cancel_workflow_execution(wf_id.clone(), None, "Dieee".to_string(), None)

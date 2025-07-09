@@ -167,8 +167,7 @@ impl WorkerHeartbeatData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_help::WorkerExt;
-    use crate::test_help::test_worker_cfg;
+    use crate::test_help::{WorkerExt, test_worker_cfg, advance_time};
     use crate::worker;
     use crate::worker::client::mocks::mock_worker_client;
     use std::sync::Arc;
@@ -219,11 +218,5 @@ mod tests {
         advance_time(Duration::from_millis(300)).await;
 
         worker.drain_activity_poller_and_shutdown().await;
-    }
-
-    async fn advance_time(dur: Duration) {
-        tokio::time::pause();
-        tokio::time::advance(dur).await;
-        tokio::time::resume();
     }
 }

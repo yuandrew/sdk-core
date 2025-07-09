@@ -33,10 +33,7 @@ use temporal_sdk_core_protos::{
         workflowservice::v1::ResetWorkflowExecutionRequest,
     },
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, WorkerTestHelpers, WorkflowHandleExt, drain_pollers_and_shutdown,
-    init_core_and_create_wf, init_core_replay_preloaded, start_timer_cmd,
-};
+use temporal_sdk_core_test_utils::{CoreWfStarter, WorkerTestHelpers, WorkflowHandleExt, drain_pollers_and_shutdown, init_core_and_create_wf, init_core_replay_preloaded, start_timer_cmd, advance_time};
 use tokio::{join, sync::Barrier};
 use uuid::Uuid;
 
@@ -672,7 +669,7 @@ async fn update_with_local_acts() {
         "echo_activity",
         |_ctx: ActContext, echo_me: String| async move {
             // Sleep so we'll heartbeat
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            advance_time(Duration::from_secs(3)).await;
             Ok(echo_me)
         },
     );
@@ -681,7 +678,7 @@ async fn update_with_local_acts() {
     let wf_id = starter.get_task_queue().to_string();
     let update = async {
         // make sure update has a chance to get registered
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
         // do a handful at once
         let updates = (1..=5).map(|_| {
             client.update_workflow_execution(
@@ -1123,7 +1120,7 @@ async fn update_after_empty_wft() {
             )
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        advance_time(Duration::from_millis(500)).await;
         let res = client
             .update_workflow_execution(
                 wf_id.clone(),
@@ -1193,7 +1190,7 @@ async fn update_lost_on_activity_mismatch() {
     let wf_id = starter.get_task_queue().to_string();
     let update = async {
         // Need time to get to condition
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        advance_time(Duration::from_millis(200)).await;
         // Evict wf
         core_worker.request_workflow_eviction(handle.info().run_id.as_ref().unwrap());
         for _ in 1..=2 {

@@ -428,7 +428,8 @@ mod test {
     use temporal_sdk_core_protos::temporal::api::{
         common::v1::Payload, workflowservice::v1::RecordActivityTaskHeartbeatResponse,
     };
-    use tokio::time::sleep;
+    use crate::test_help::advance_time;
+
 
     /// Ensure that heartbeats that are sent with a small `throttle_interval` are aggregated and sent roughly once
     /// every 1/2 of the heartbeat timeout.
@@ -447,10 +448,10 @@ mod test {
         // the second should be throttled until 50ms have passed.
         for i in 0_u8..2 {
             record_heartbeat(&hm, fake_task_token.clone(), i, Duration::from_millis(50));
-            sleep(Duration::from_millis(20)).await;
+            advance_time(Duration::from_millis(20)).await;
         }
-        // sleep again to let heartbeats be flushed
-        sleep(Duration::from_millis(20)).await;
+        // advance_time again to let heartbeats be flushed
+        advance_time(Duration::from_millis(20)).await;
         hm.shutdown().await;
     }
 
@@ -467,7 +468,7 @@ mod test {
         // Heartbeats always get sent if recorded less frequently than the throttle interval
         for i in 0_u8..3 {
             record_heartbeat(&hm, fake_task_token.clone(), i, Duration::from_millis(10));
-            sleep(Duration::from_millis(20)).await;
+            advance_time(Duration::from_millis(20)).await;
         }
         hm.shutdown().await;
     }
@@ -487,7 +488,7 @@ mod test {
         for i in 0_u8..50 {
             record_heartbeat(&hm, fake_task_token.clone(), i, Duration::from_millis(2000));
             // Let it propagate
-            sleep(Duration::from_millis(10)).await;
+            advance_time(Duration::from_millis(10)).await;
         }
         hm.shutdown().await;
     }
@@ -504,10 +505,10 @@ mod test {
         let hm = ActivityHeartbeatManager::new(Arc::new(mock_client), cancel_tx);
         let fake_task_token = vec![1, 2, 3];
         record_heartbeat(&hm, fake_task_token.clone(), 0, Duration::from_millis(100));
-        sleep(Duration::from_millis(500)).await;
+        advance_time(Duration::from_millis(500)).await;
         record_heartbeat(&hm, fake_task_token, 1, Duration::from_millis(100));
         // Let it propagate
-        sleep(Duration::from_millis(50)).await;
+        advance_time(Duration::from_millis(50)).await;
         hm.shutdown().await;
     }
 
@@ -523,11 +524,11 @@ mod test {
         let fake_task_token = vec![1, 2, 3];
         record_heartbeat(&hm, fake_task_token.clone(), 0, Duration::from_millis(100));
         // Let it propagate
-        sleep(Duration::from_millis(10)).await;
+        advance_time(Duration::from_millis(10)).await;
         hm.evict(fake_task_token.clone().into()).await;
         record_heartbeat(&hm, fake_task_token, 0, Duration::from_millis(100));
         // Let it propagate
-        sleep(Duration::from_millis(10)).await;
+        advance_time(Duration::from_millis(10)).await;
         // We know it works b/c otherwise we would have only called record 1 time w/o sleep
         hm.shutdown().await;
     }

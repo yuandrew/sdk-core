@@ -18,7 +18,7 @@ use temporal_sdk::{ActContext, ActivityOptions, WfContext};
 use temporal_sdk_core::CoreRuntime;
 use temporal_sdk_core_api::{telemetry::PrometheusExporterOptionsBuilder, worker::PollerBehavior};
 use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
-use temporal_sdk_core_test_utils::{CoreWfStarter, prom_metrics, rand_6_chars};
+use temporal_sdk_core_test_utils::{CoreWfStarter, prom_metrics, rand_6_chars, advance_time};
 use tracing::info;
 
 #[tokio::test]
@@ -81,7 +81,7 @@ async fn poller_load_spiky() {
     worker.register_activity("echo", |_: ActContext, echo: String| async move {
         // Add some jitter to completions
         let rand_millis = rand::rng().random_range(0..500);
-        tokio::time::sleep(Duration::from_millis(rand_millis)).await;
+        advance_time(Duration::from_millis(rand_millis)).await;
         Ok(echo)
     });
     let client = starter.get_client().await;
@@ -121,7 +121,7 @@ async fn poller_load_spiky() {
         info!("Initial load ran for {:?}", start_processing.elapsed());
         ah.abort();
         // Wait a minute for poller count to drop
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        advance_time(Duration::from_secs(60)).await;
         // round two
         let start_processing = Instant::now();
         for i in 0..500 {
@@ -171,7 +171,7 @@ async fn poller_load_spiky() {
                     .forward(sink::drain())
                     .await
                     .expect("Sending signals works");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                advance_time(Duration::from_secs(2)).await;
             }
         },
         abort_reg,
@@ -330,7 +330,7 @@ async fn poller_load_spike_then_sustained() {
     worker.register_activity("echo", |_: ActContext, echo: String| async move {
         // Add some jitter to completions
         let rand_millis = rand::rng().random_range(0..500);
-        tokio::time::sleep(Duration::from_millis(rand_millis)).await;
+        advance_time(Duration::from_millis(rand_millis)).await;
         Ok(echo)
     });
     let client = starter.get_client().await;
@@ -387,7 +387,7 @@ async fn poller_load_spike_then_sustained() {
                 .await
                 .unwrap();
             workflow_handles.push(client.get_untyped_workflow_handle(wfid, rid));
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            advance_time(Duration::from_secs(1)).await;
         }
         stream::iter(workflow_handles)
             .for_each_concurrent(25, |handle| async move {
@@ -420,7 +420,7 @@ async fn poller_load_spike_then_sustained() {
                     .forward(sink::drain())
                     .await
                     .expect("Sending signals works");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                advance_time(Duration::from_secs(2)).await;
             }
         },
         abort_reg,

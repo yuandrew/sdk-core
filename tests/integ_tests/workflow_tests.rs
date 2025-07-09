@@ -93,7 +93,7 @@ async fn shutdown_aborts_actively_blocked_poll() {
     // Begin the poll, and request shutdown from another thread after a small period of time.
     let tcore = core.clone();
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
         drain_pollers_and_shutdown(&tcore).await;
     });
     assert_matches!(
@@ -500,7 +500,7 @@ async fn slow_completes_with_small_cache() {
     impl WorkerInterceptor for SlowCompleter {
         async fn on_workflow_activation_completion(&self, _: &WorkflowActivationCompletion) {
             // They don't need to be much slower
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            advance_time(Duration::from_millis(100)).await;
         }
         fn on_shutdown(&self, _: &temporal_sdk::Worker) {}
     }
@@ -787,7 +787,7 @@ async fn nondeterminism_errors_fail_workflow_when_configured_to(
             if has_timer_event {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            advance_time(Duration::from_millis(100)).await;
         }
         core_worker.initiate_shutdown();
     };

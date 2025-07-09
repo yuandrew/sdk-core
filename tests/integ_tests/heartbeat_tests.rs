@@ -23,7 +23,6 @@ use temporal_sdk_core_test_utils::{
     CoreWfStarter, WorkerTestHelpers, drain_pollers_and_shutdown, init_core_and_create_wf,
     schedule_activity_cmd,
 };
-use tokio::time::sleep;
 
 #[tokio::test]
 async fn activity_heartbeat() {
@@ -58,7 +57,7 @@ async fn activity_heartbeat() {
     // Activity shouldn't timeout since we are sending heartbeats regularly, however if we didn't
     // send heartbeats activity would have timed out as it takes 2 sec to execute this loop.
     for _ in 0u8..20 {
-        sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
         core.record_activity_heartbeat(ActivityHeartbeat {
             task_token: task.task_token.clone(),
             details: vec![],
@@ -184,7 +183,7 @@ async fn activity_doesnt_heartbeat_hits_timeout_then_completes() {
     worker.register_activity(
         "echo_activity",
         |_ctx: ActContext, echo_me: String| async move {
-            sleep(Duration::from_secs(4)).await;
+            advance_time(Duration::from_secs(4)).await;
             Ok(echo_me)
         },
     );

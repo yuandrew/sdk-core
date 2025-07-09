@@ -18,9 +18,7 @@ use temporal_sdk_core_protos::{
     coresdk::{AsJsonPayloadExt, workflow_commands::ActivityCancellationType},
     temporal::api::enums::v1::WorkflowIdReusePolicy,
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, init_integ_telem, prom_metrics, rand_6_chars, workflows::la_problem_workflow,
-};
+use temporal_sdk_core_test_utils::{CoreWfStarter, init_integ_telem, prom_metrics, rand_6_chars, workflows::la_problem_workflow, advance_time};
 
 mod fuzzy_workflow;
 
@@ -261,7 +259,7 @@ async fn workflow_load() {
                 .forward(sink::drain())
                 .await
                 .expect("Sending signals works");
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            advance_time(Duration::from_secs(2)).await;
         }
     };
     tokio::select! { r1 = worker.run_until_done() => {r1.unwrap()}, _ = sig_sender => {}}
@@ -282,7 +280,7 @@ async fn evict_while_la_running_no_interference() {
 
     worker.register_wf(wf_name.to_owned(), la_problem_workflow);
     worker.register_activity("delay", |_: ActContext, _: String| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        advance_time(Duration::from_secs(15)).await;
         Ok(())
     });
 
@@ -303,7 +301,7 @@ async fn evict_while_la_running_no_interference() {
         let client = client.clone();
         subfs.push(async move {
             // Evict the workflow
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            advance_time(Duration::from_secs(1)).await;
             cw.request_workflow_eviction(&run_id);
             // Wake up workflow by sending signal
             client
@@ -371,7 +369,7 @@ async fn can_paginate_long_history() {
                     .await
                     .unwrap();
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            advance_time(Duration::from_secs(3)).await;
         }
     });
     worker.run_until_done().await.unwrap();
@@ -425,7 +423,7 @@ async fn poller_autoscaling_basic_loadtest() {
     worker.register_activity("echo", |_: ActContext, echo: String| async move {
         // Add some jitter to completions
         let rand_millis = rand::rng().random_range(0..500);
-        tokio::time::sleep(Duration::from_millis(rand_millis)).await;
+        advance_time(Duration::from_millis(rand_millis)).await;
         Ok(echo)
     });
     let client = starter.get_client().await;
@@ -480,7 +478,7 @@ async fn poller_autoscaling_basic_loadtest() {
                     .forward(sink::drain())
                     .await
                     .expect("Sending signals works");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                advance_time(Duration::from_secs(2)).await;
             }
         },
         abort_reg,

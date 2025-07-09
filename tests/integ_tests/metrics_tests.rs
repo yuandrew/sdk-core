@@ -62,10 +62,7 @@ use temporal_sdk_core_protos::{
         workflowservice::v1::{DescribeNamespaceRequest, ListNamespacesRequest},
     },
 };
-use temporal_sdk_core_test_utils::{
-    ANY_PORT, CoreWfStarter, NAMESPACE, OTEL_URL_ENV_VAR, PROMETHEUS_QUERY_API,
-    get_integ_server_options, get_integ_telem_options, prom_metrics,
-};
+use temporal_sdk_core_test_utils::{ANY_PORT, CoreWfStarter, NAMESPACE, OTEL_URL_ENV_VAR, PROMETHEUS_QUERY_API, get_integ_server_options, get_integ_telem_options, prom_metrics, advance_time};
 use tokio::{join, sync::Barrier};
 use url::Url;
 
@@ -242,7 +239,7 @@ async fn one_slot_worker_reports_available_slot() {
 
     let testing = async {
         // Wait just a beat for the poller to initiate
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        advance_time(Duration::from_millis(50)).await;
         let body = get_text(format!("http://{addr}/metrics")).await;
         assert!(body.contains(&format!(
             "temporal_worker_task_slots_available{{namespace=\"{NAMESPACE}\",\
@@ -327,7 +324,7 @@ async fn one_slot_worker_reports_available_slot() {
         wf_task_barr.wait().await;
         wf_task_barr.wait().await;
         // Sometimes the recording takes an extra bit. 🤷
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
         let body = get_text(format!("http://{addr}/metrics")).await;
         assert!(body.contains(&format!(
             "temporal_worker_task_slots_available{{namespace=\"{NAMESPACE}\",\
@@ -678,7 +675,7 @@ async fn request_fail_codes_otel() {
             .await
             .unwrap_err();
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        advance_time(Duration::from_secs(1)).await;
     }
 }
 
@@ -735,7 +732,7 @@ async fn docker_metrics_with_prometheus(
     client.list_namespaces().await.unwrap();
 
     // Give Prometheus time to scrape metrics
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    advance_time(Duration::from_secs(2)).await;
 
     // Query Prometheus API for metrics
     let client = reqwest::Client::new();

@@ -1,4 +1,4 @@
-pub(crate) use temporal_sdk_core_test_utils::canned_histories;
+pub(crate) use temporal_sdk_core_test_utils::{advance_time, canned_histories};
 
 use crate::{
     TaskToken, Worker, WorkerConfig, WorkerConfigBuilder,
@@ -673,7 +673,7 @@ pub(crate) fn build_mock_pollers(mut cfg: MockPollCfg) -> MocksHolder {
             if no_tasks_for_anyone {
                 tokio::select! {
                     _ = outstanding_wakeup.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                    _ = advance_time(Duration::from_secs(60)) => {}
                 }
             }
         }
@@ -1103,3 +1103,9 @@ impl WorkerExt for Worker {
         self.shutdown().await;
     }
 }
+
+// pub(crate) async fn advance_time(dur: Duration) {
+//     tokio::time::pause();
+//     tokio::time::advance(dur).await;
+//     tokio::time::resume();
+// }

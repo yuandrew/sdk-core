@@ -7,7 +7,7 @@ use temporal_sdk_core::{
 use temporal_sdk_core_api::telemetry::{
     Logger, OtelCollectorOptionsBuilder, TelemetryOptionsBuilder, metrics::CoreMeter,
 };
-use temporal_sdk_core_test_utils::CoreWfStarter;
+use temporal_sdk_core_test_utils::{advance_time, CoreWfStarter};
 use tracing::Level;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -86,7 +86,7 @@ async fn otel_errors_logged_as_errors() {
 
     // Wait to allow exporter to attempt sending metrics and fail.
     // Windows takes a while to fail the network attempt for some reason so 5s.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    advance_time(Duration::from_secs(5)).await;
 
     let logs = logs.lock();
     let log_str = String::from_utf8_lossy(&logs).into_owned();

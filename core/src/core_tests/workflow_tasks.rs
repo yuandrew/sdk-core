@@ -9,7 +9,7 @@ use crate::{
         build_fake_worker, build_mock_pollers, build_multihist_mock_sg, canned_histories,
         gen_assert_and_fail, gen_assert_and_reply, hist_to_poll_resp, mock_sdk, mock_sdk_cfg,
         mock_worker, poll_and_reply, poll_and_reply_clears_outstanding_evicts, single_hist_mock_sg,
-        test_worker_cfg,
+        test_worker_cfg, advance_time,
     },
     worker::{
         TunerBuilder,
@@ -2854,7 +2854,7 @@ async fn poller_wont_poll_until_lang_polls() {
         mock_client,
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    advance_time(Duration::from_millis(100)).await;
 
     worker.drain_pollers_and_shutdown().await;
     // Nothing should've appeared here or we did poll

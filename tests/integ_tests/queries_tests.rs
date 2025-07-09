@@ -10,10 +10,7 @@ use temporal_sdk_core_protos::{
     },
     temporal::api::{failure::v1::Failure, query::v1::WorkflowQuery},
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, WorkerTestHelpers, drain_pollers_and_shutdown, init_core_and_create_wf,
-    start_timer_cmd,
-};
+use temporal_sdk_core_test_utils::{CoreWfStarter, WorkerTestHelpers, drain_pollers_and_shutdown, init_core_and_create_wf, start_timer_cmd, advance_time};
 use tokio::join;
 
 #[tokio::test]
@@ -40,7 +37,7 @@ async fn simple_query_legacy() {
     ))
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    advance_time(Duration::from_secs(1)).await;
     // Query after timer should have fired and there should be new WFT
     let query_fut = async {
         starter
@@ -60,7 +57,7 @@ async fn simple_query_legacy() {
     };
     let workflow_completions_future = async {
         // Give query a beat to get going
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        advance_time(Duration::from_millis(400)).await;
         // This poll *should* have the `queries` field populated, but doesn't, seemingly due to
         // a server bug. So, complete the WF task of the first timer firing with empty commands
         let task = core.poll_workflow_activation().await.unwrap();
@@ -402,7 +399,7 @@ async fn queries_handled_before_next_wft() {
             )
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        advance_time(Duration::from_millis(500)).await;
         core.complete_workflow_activation(WorkflowActivationCompletion::from_cmd(
             task.run_id,
             QueryResult {

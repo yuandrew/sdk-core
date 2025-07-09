@@ -23,7 +23,7 @@ use temporal_sdk_core_protos::temporal::api::{
         RespondActivityTaskCanceledResponse,
     },
 };
-use temporal_sdk_core_test_utils::{CoreWfStarter, NAMESPACE, get_integ_server_options};
+use temporal_sdk_core_test_utils::{CoreWfStarter, NAMESPACE, get_integ_server_options, advance_time};
 use tokio::{
     net::TcpListener,
     sync::{mpsc::UnboundedSender, oneshot},
@@ -44,7 +44,7 @@ async fn can_use_retry_client() {
     let retry_client = core.get_client().await;
     for _ in 0..10 {
         retry_client.list_namespaces().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        advance_time(Duration::from_millis(10)).await;
     }
 }
 

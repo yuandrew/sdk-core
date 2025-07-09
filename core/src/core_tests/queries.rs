@@ -1,7 +1,7 @@
 use crate::{
     test_help::{
         MockPollCfg, MocksHolder, ResponseType, WorkerExt, build_mock_pollers, canned_histories,
-        hist_to_poll_resp, mock_worker, single_hist_mock_sg,
+        hist_to_poll_resp, mock_worker, single_hist_mock_sg, advance_time,
     },
     worker::{
         LEGACY_QUERY_ID,
@@ -995,7 +995,7 @@ async fn queries_arent_lost_in_buffer_void(#[values(false, true)] buffered_becau
             }]
         );
         // Wait a beat to ensure the other task(s) have a chance to be buffered
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
         core.complete_workflow_activation(WorkflowActivationCompletion::empty(task.run_id))
             .await
             .unwrap();

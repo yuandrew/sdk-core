@@ -29,9 +29,7 @@ mod integ_tests {
         operatorservice::v1::CreateNexusEndpointRequest,
         workflowservice::v1::ListNamespacesRequest,
     };
-    use temporal_sdk_core_test_utils::{
-        CoreWfStarter, get_integ_server_options, get_integ_telem_options, rand_6_chars,
-    };
+    use temporal_sdk_core_test_utils::{CoreWfStarter, get_integ_server_options, get_integ_telem_options, rand_6_chars, advance_time};
 
     // Create a worker like a bridge would (unwraps aside)
     #[tokio::test]
@@ -82,7 +80,7 @@ mod integ_tests {
             .await
             .unwrap();
         // Endpoint creation can (as of server 1.25.2 at least) return before they are actually usable.
-        tokio::time::sleep(Duration::from_millis(800)).await;
+        advance_time(Duration::from_millis(800)).await;
         endpoint
     }
 }

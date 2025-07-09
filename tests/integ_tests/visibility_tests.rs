@@ -7,11 +7,7 @@ use temporal_client::{
 use temporal_sdk_core_protos::coresdk::workflow_activation::{
     WorkflowActivationJob, workflow_activation_job,
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, NAMESPACE, WorkerTestHelpers, drain_pollers_and_shutdown,
-    get_integ_server_options,
-};
-use tokio::time::sleep;
+use temporal_sdk_core_test_utils::{CoreWfStarter, NAMESPACE, WorkerTestHelpers, drain_pollers_and_shutdown, get_integ_server_options, advance_time};
 
 #[tokio::test]
 async fn client_list_open_closed_workflow_executions() {
@@ -83,7 +79,7 @@ async fn client_list_open_closed_workflow_executions() {
                 break;
             }
         }
-        sleep(Duration::from_millis(100)).await;
+        advance_time(Duration::from_millis(100)).await;
     }
     assert!(passed);
 }
@@ -129,7 +125,7 @@ async fn client_create_namespace() {
                 if attempts == 12 {
                     panic!("failed to query registered namespace");
                 }
-                sleep(wait_time).await
+                advance_time(wait_time).await
             }
         }
     }

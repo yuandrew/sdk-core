@@ -25,7 +25,7 @@ temporal-client = { path = "../client" }
 temporal-sdk = { path = "../sdk" }
 temporal-sdk-core = { path = "../core" }
 temporal-sdk-core-api = { path = "../core-api" }
-tokio = "1.1"
+tokio = {  version = "1.1", features = ["test-util"]}
 tracing = "0.1"
 url = "2.2"
 

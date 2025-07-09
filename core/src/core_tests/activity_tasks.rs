@@ -1,3 +1,4 @@
+use crate::test_help::advance_time;
 use crate::{
     ActivityHeartbeat, Worker, advance_fut, job_assert, prost_dur,
     test_help::{
@@ -250,6 +251,7 @@ async fn activity_cancel_interrupts_poll() {
         }
         .boxed(),
         async {
+            // advance_time(Duration::from_millis(500)).await;
             tokio::time::sleep(Duration::from_millis(500)).await;
             Some(Ok(Default::default()))
         }
@@ -848,6 +850,7 @@ async fn activity_tasks_from_completion_are_delivered() {
     assert_eq!(num_eager_requested.load(Ordering::Relaxed), 3);
 }
 
+// TODO: failing, didn't directly change any time here
 #[tokio::test]
 async fn activity_tasks_from_completion_reserve_slots() {
     let wf_id = "fake_wf_id";
@@ -1098,7 +1101,9 @@ async fn graceful_shutdown(#[values(true, false)] at_max_outstanding: bool) {
     let _1 = worker.poll_activity_task().await.unwrap();
 
     // Wait at least the grace period after one poll - ensuring it doesn't trigger prematurely
-    tokio::time::sleep(grace_period.mul_f32(1.1)).await;
+    println!("grace_period.mul_f32(1.1) {:?}", grace_period.mul_f32(1.1));
+    advance_time(grace_period.mul_f32(1.1)).await;
+    // tokio::time::sleep(grace_period.mul_f32(1.1)).await;
 
     let _2 = worker.poll_activity_task().await.unwrap();
     let _3 = worker.poll_activity_task().await.unwrap();
@@ -1160,6 +1165,7 @@ async fn activities_must_be_flushed_to_server_on_shutdown(#[values(true, false)]
         .returning(|_, _| {
             async {
                 // We need some artificial delay here and there's nothing meaningful to sync with
+                // advance_time(Duration::from_millis(100)).await;
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if shutdown_finished.load(Ordering::Acquire) {
                     panic!("Shutdown must complete *after* server sees the activity completion");

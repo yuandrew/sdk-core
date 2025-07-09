@@ -1003,6 +1003,15 @@ where
         if let Ok(v) = func().await {
             return Ok(v);
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        advance_time(Duration::from_millis(50)).await;
     }
+}
+
+pub async fn advance_time(duration: Duration) {
+    println!("[advance] {:?}", duration);
+    use std::backtrace::Backtrace;
+    println!("Custom backtrace: {}", Backtrace::capture());
+    tokio::time::pause();
+    tokio::time::advance(duration).await;
+    tokio::time::resume();
 }

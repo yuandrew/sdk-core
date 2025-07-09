@@ -3,7 +3,7 @@ use crate::{
     replay::{DEFAULT_WORKFLOW_TYPE, TestHistoryBuilder, default_wes_attribs},
     test_help::{
         MockPollCfg, ResponseType, WorkerExt, build_mock_pollers, hist_to_poll_resp, mock_sdk,
-        mock_sdk_cfg, mock_worker, single_hist_mock_sg,
+        mock_sdk_cfg, mock_worker, single_hist_mock_sg, advance_time,
     },
     worker::{LEGACY_QUERY_ID, client::mocks::mock_worker_client},
 };
@@ -206,7 +206,7 @@ async fn local_act_heartbeat(#[case] shutdown_middle: bool) {
             shutdown_barr.wait().await;
         }
         // Take slightly more than two workflow tasks
-        tokio::time::sleep(wft_timeout.mul_f32(2.2)).await;
+        advance_time(wft_timeout.mul_f32(2.2)).await;
         Ok(str)
     });
     worker
@@ -911,7 +911,7 @@ async fn start_to_close_timeout_allows_retries(#[values(true, false)] la_complet
             // Timeout the first 4 attempts, or all of them if we intend to fail
             if attempts.fetch_add(1, Ordering::AcqRel) < 4 || !la_completes {
                 select! {
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => (),
+                    _ = advance_time(Duration::from_millis(100)) => (),
                     _ = ctx.cancelled() => {
                         cancels.fetch_add(1, Ordering::AcqRel);
                         return Err(ActivityError::cancelled());
