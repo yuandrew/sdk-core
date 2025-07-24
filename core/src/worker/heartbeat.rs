@@ -1,29 +1,31 @@
-use crate::WorkerClient;
+use crate::{WorkerClient};
 use crate::abstractions::{MeteredPermitDealer, dbg_panic};
 use crate::pollers::{BoxedNexusPoller, LongPollBuffer};
 use crate::telemetry::metrics::{MetricsContext, nexus_poller};
 use crate::worker::nexus::NexusManager;
 use gethostname::gethostname;
-use parking_lot::Mutex;
+use parking_lot::{Mutex};
 use prost_types::Duration as PbDuration;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime};
 use temporal_client::Client;
-use temporal_sdk_core_api::worker::{NexusSlotKind, PollerBehavior, WorkerConfig};
+use temporal_sdk_core_api::worker::{NexusSlotKind, PollerBehavior, WorkerConfig, WorkerConfigBuilder, WorkerVersioningStrategy};
 use temporal_sdk_core_protos::temporal::api::worker::v1::{WorkerHeartbeat, WorkerHostInfo};
 use temporal_sdk_core_protos::temporal::api::workflowservice::v1::{
     PollNexusTaskQueueResponse, RecordWorkerHeartbeatRequest,
 };
-use tokio::sync::Notify;
+use tokio::sync::{RwLock, Notify};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tokio::time::MissedTickBehavior;
+use tokio::time::{Interval, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use temporal_sdk_core_api::Worker;
 
-pub(crate) type HeartbeatFn = Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
-pub(crate) type HeartbeatMap = HashMap<ClientIdentity, HeartbeatNamespaceManager>;
+pub(crate) type HeartbeatCallback = Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
+// TODO: needs a better, more accurate name
+pub(crate) type HeartbeatMap = HashMap<ClientIdentity, SharedNamespaceWorker>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ClientIdentity {
@@ -32,58 +34,79 @@ pub(crate) struct ClientIdentity {
     pub(crate) task_queue: String,
 }
 
-pub(crate) struct HeartbeatNamespaceManager {
-    pub(crate) heartbeats: Arc<Mutex<Vec<HeartbeatFn>>>,
-    heartbeat_handle: JoinHandle<()>,
-\    task_tx: UnboundedSender<()>,
+/// SharedNamespaceWorker is responsible for polling worker commands and sending worker heartbeat
+/// to the server. This communicates with all workers in the same process that share the same
+/// namespace.
+pub(crate) struct SharedNamespaceWorker {
+    pub(crate) heartbeat_callbacks: Arc<Mutex<Vec<HeartbeatCallback>>>,
+    join_handle: JoinHandle<()>,
+    heartbeat_interval: Duration,
 }
 
-impl HeartbeatNamespaceManager {
+impl SharedNamespaceWorker {
     pub(crate) fn new(
         client: Arc<dyn WorkerClient>,
         key: ClientIdentity,
-        poller_behavior: PollerBehavior,
-        permit_dealer: MeteredPermitDealer<NexusSlotKind>,
-        shutdown: CancellationToken, // TODO: duplicate with shutdown_initiated_token?
-        metrics: MetricsContext,
-        graceful_shutdown: Option<Duration>,
-        shutdown_initiated_token: CancellationToken,
+        task_queue_key: Uuid, // TODO: needed?
         heartbeat_interval: Duration,
+        heartbeat_callback: HeartbeatCallback,
     ) -> Self {
-        let np_metrics = metrics.with_new_attrs([nexus_poller()]);
-        let poller = Box::new(LongPollBuffer::new_nexus_task(
+        let config = WorkerConfigBuilder::default()
+            .namespace(key.namespace.clone())
+            .task_queue(format!(
+                "temporal-sys/worker-commands/{}/{}",
+                key.namespace.clone(),
+                task_queue_key.to_string(),
+                )
+            )
+            .no_remote_activities(true)
+            .max_outstanding_nexus_tasks(5_usize) // TODO: arbitrary low number, feel free to change when needed
+            .versioning_strategy(WorkerVersioningStrategy::None {
+                build_id: "1.0".to_owned(),
+            })
+            .build()
+            .unwrap(); // TODO: Unwrap
+        let worker = crate::worker::Worker::new(
+            config,
+            None, // TODO: want sticky queue?
             client.clone(),
-            key.task_queue.clone(),
-            poller_behavior,
-            permit_dealer,
-            shutdown,
-            Some(move |np| np_metrics.record_num_pollers(np)),
-        )) as BoxedNexusPoller;
-
-        let manager = NexusManager::new(
-            poller,
-            metrics.clone(),
-            graceful_shutdown,
-            shutdown_initiated_token,
+            None, // TODO: telemetry
         );
 
-        let (task_tx, task_rx) = unbounded_channel();
-        let heartbeats = Arc::new(Mutex::new(Vec::<HeartbeatFn>::new()));
+        let hb_callbacks = Arc::new(Mutex::new(vec![heartbeat_callback]));
         // heartbeat task
         let sdk_name_and_ver = client.sdk_name_and_version();
         let reset_notify = Arc::new(Notify::new());
-        let heartbeats_clone = heartbeats.clone();
+        let hb_callbacks_clone = hb_callbacks.clone();
         let client_clone = client.clone();
+        let (interval_tx, mut interval_rx) = unbounded_channel();
 
-        let heartbeat_handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(heartbeat_interval);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // runtime have option to turn off worker heartbeat,
+        // set at runtime, 
+        let join_handle = tokio::spawn(async move {
+            // let mut ticker = Arc::new(Mutex::new(tokio::time::interval(heartbeat_interval)));
+            // ticker.lock().set_missed_tick_behavior(MissedTickBehavior::Delay);
+            //  atomic is the interval, check if that changed since last time
+            // TODO: mutex<option<Interval>>
+
+            let mut ticker = RwLock::new(Arc::new(tokio::time::interval(heartbeat_interval)));
+            // let mut ticker = Arc::new(RwLock::new(tokio::time::interval(heartbeat_interval)));
+            ticker.write().await.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
-                    _ = ticker.tick() => {
+                    _ = {
+                        // ticker.read().await.tick()
+                        let mut ticker_handle: Arc<Interval> = {
+                            let guard = ticker.read().await;
+                            Arc::clone(&*guard)
+                        };
+                        
+
+                        ticker_handle.tick()
+                    } => {
                         let mut hb_to_send = Vec::new();
-                        for heartbeat_fn in heartbeats_clone.lock().iter() {
-                            hb_to_send.push(heartbeat_fn.as_ref()());
+                        for heartbeat_callback in hb_callbacks_clone.lock().iter() {
+                            hb_to_send.push(heartbeat_callback.as_ref()());
                         }
                         if let Err(e) = client_clone.record_worker_heartbeat(key.namespace.clone(), key.endpoint.clone(), hb_to_send
                             ).await {
@@ -97,61 +120,29 @@ impl HeartbeatNamespaceManager {
                             }
                     }
                     _ = reset_notify.notified() => {
-                        ticker.reset();
+                        ticker.write().await.reset();
                     }
                     // TODO: handle nexus tasks
-                    res = manager.next_nexus_task() => {
+                    res = worker.poll_nexus_task() => {
                         match res {
                             Ok(task) => todo!(),
                             Err(e) => todo!("log error"),
                         }
                     }
+                    new_interval_res = interval_rx.recv() => {
+                        let mut replace_ticker = ticker.write().await;
+                        let mut new_interval = tokio::time::interval(new_interval_res.unwrap()); // TODO: unwrap()
+                        new_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                        *replace_ticker = Arc::new(new_interval);
+                    }
                 }
             }
         });
 
-        let task_tx_clone = task_tx.clone();
-
         Self {
-            heartbeats,
-            task_tx,
-            heartbeat_handle,
-        }
-    }
-
-    pub(crate) fn register_heartbeat(&mut self, heartbeat_fn: HeartbeatFn) {
-        self.heartbeats.lock().push(heartbeat_fn);
-    }
-}
-
-pub(crate) struct WorkerHeartbeatManager {
-    config: WorkerConfig,
-    client: Arc<dyn WorkerClient>,
-    /// Nexus polling and heartbeating happens at a per-namespace level,
-    /// map namespace+endpoint to HeartbeatNamespaceManager
-    heartbeat_map: Arc<Mutex<HeartbeatMap>>,
-    permit_dealer: MeteredPermitDealer<NexusSlotKind>,
-    shutdown_initiated_token: CancellationToken,
-    metrics: MetricsContext,
-}
-
-impl WorkerHeartbeatManager {
-    pub(crate) fn new(
-        config: WorkerConfig,
-        identity: String,
-        client: Arc<dyn WorkerClient>,
-        heartbeat_map: Arc<Mutex<HeartbeatMap>>,
-        permit_dealer: MeteredPermitDealer<NexusSlotKind>,
-        metrics: MetricsContext,
-        shutdown_initiated_token: CancellationToken,
-    ) -> Self {
-        Self {
-            heartbeat_map,
-            config,
-            client,
-            permit_dealer,
-            shutdown_initiated_token,
-            metrics,
+            heartbeat_callbacks: hb_callbacks,
+            join_handle,
+            heartbeat_interval,
         }
     }
 
@@ -159,26 +150,10 @@ impl WorkerHeartbeatManager {
         // TODO: Implement shutdown logic for all namespace managers
     }
 
-    pub(crate) fn register_heartbeat(&self, key: ClientIdentity, heartbeat: HeartbeatFn) {
-        if self.heartbeat_map.lock().contains_key(&key) {}
-        self.heartbeat_map
-            .lock()
-            .entry(key.clone())
-            .and_modify(|mgr| mgr.register_heartbeat(heartbeat))
-            .or_insert_with(|| {
-                // TODO: params need to be fixed, this is just a placeholder
-                HeartbeatNamespaceManager::new(
-                    self.client.clone(),
-                    key,
-                    self.config.nexus_task_poller_behavior,
-                    self.permit_dealer.clone(),
-                    self.shutdown_initiated_token.clone(),
-                    self.metrics.clone(),
-                    self.config.graceful_shutdown_period,
-                    self.shutdown_initiated_token.clone(),
-                    Duration::from_secs(30), // Default heartbeat interval
-                )
-            });
+    pub(crate) fn add_callback(&mut self, heartbeat_callback: HeartbeatCallback, heartbeat_interval: Duration) {
+        if heartbeat_interval < self.
+        // TODO: should check each registered worker and if the `heartbeat_interval` is lower, change `self` to the lower value
+        self.heartbeat_callbacks.lock().push(heartbeat_callback);
     }
 }
 
@@ -252,11 +227,6 @@ impl WorkerHeartbeatData {
     }
 }
 
-pub(crate) enum WorkerHeartbeatDetails {
-    Fn(OnceLock<HeartbeatFn>),
-    Map(Arc<Mutex<HeartbeatMap>>),
-}
-
 // #[cfg(test)]
 // mod tests {
 //     use super::*;
@@ -299,15 +269,15 @@ pub(crate) enum WorkerHeartbeatDetails {
 //             .build()
 //             .unwrap();
 //
-//         let heartbeat_fn = Arc::new(OnceLock::new());
+//         let heartbeat_callback = Arc::new(OnceLock::new());
 //         let client = Arc::new(mock);
-//         let worker = worker::Worker::new(config, None, client, None, Some(heartbeat_fn.clone()));
-//         heartbeat_fn.get().unwrap()();
+//         let worker = worker::Worker::new(config, None, client, None, Some(heartbeat_callback.clone()));
+//         heartbeat_callback.get().unwrap()();
 //
 //         // heartbeat timer fires once
 //         advance_time(Duration::from_millis(300)).await;
 //         // it hasn't been >90% of the interval since the last heartbeat, so no data should be returned here
-//         assert_eq!(None, heartbeat_fn.get().unwrap()());
+//         assert_eq!(None, heartbeat_callback.get().unwrap()());
 //         // heartbeat timer fires once
 //         advance_time(Duration::from_millis(300)).await;
 //
