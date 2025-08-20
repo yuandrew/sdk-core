@@ -833,6 +833,10 @@ pub fn get_integ_telem_options() -> TelemetryOptions {
     .unwrap()
 }
 
+pub fn get_integ_runtime_options(heartbeat_interval: Option<Duration>) -> RuntimeOptions {
+    RuntimeOptions::new(get_integ_telem_options(), heartbeat_interval)
+}
+
 #[cfg(feature = "ephemeral-server")]
 pub fn default_cached_download() -> EphemeralExe {
     EphemeralExe::CachedDownload {

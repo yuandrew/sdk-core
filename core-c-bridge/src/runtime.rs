@@ -32,7 +32,7 @@ use url::Url;
 #[repr(C)]
 pub struct RuntimeOptions {
     pub telemetry: *const TelemetryOptions,
-    pub heartbeat_duration_millis: u64,
+    pub worker_heartbeat_duration_millis: u64,
 }
 
 #[repr(C)]
@@ -240,10 +240,16 @@ impl Runtime {
         } else {
             CoreTelemetryOptions::default()
         };
-        let core_runtime_options = CoreRuntimeOptions::new(
-            telemetry_options,
-            Some(Duration::from_millis(options.heartbeat_duration_millis)),
-        );
+
+        let heartbeat_interval = if options.worker_heartbeat_duration_millis == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(
+                options.worker_heartbeat_duration_millis,
+            ))
+        };
+
+        let core_runtime_options = CoreRuntimeOptions::new(telemetry_options, heartbeat_interval);
 
         // Build core runtime
         let mut core = CoreRuntime::new(core_runtime_options, TokioRuntimeBuilder::default())?;

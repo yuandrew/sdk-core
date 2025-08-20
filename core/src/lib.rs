@@ -117,6 +117,8 @@ where
         bail!("Client identity cannot be empty. Either lang or user should be setting this value");
     }
 
+    // let in_memory_meter = runtime.telemetry.in_memory_meter();
+
     let client_bag = Arc::new(WorkerClientBag::new(
         client,
         namespace.clone(),

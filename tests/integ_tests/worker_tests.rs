@@ -1,4 +1,5 @@
 use crate::shared_tests;
+use anyhow::anyhow;
 use assert_matches::assert_matches;
 use std::{
     cell::Cell,
@@ -9,13 +10,16 @@ use std::{
     time::Duration,
 };
 use temporal_client::WorkflowOptions;
-use temporal_sdk::{WfContext, interceptors::WorkerInterceptor};
+use temporal_sdk::{
+    ActContext, ActivityError, ActivityOptions, WfContext, interceptors::WorkerInterceptor,
+};
 use temporal_sdk_core::{CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, init_worker};
 use temporal_sdk_core_api::{
     Worker,
     errors::WorkerValidationError,
     worker::{PollerBehavior, WorkerConfigBuilder, WorkerVersioningStrategy},
 };
+use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 use temporal_sdk_core_protos::{
     coresdk::workflow_completion::{
         Failure, WorkflowActivationCompletion, workflow_activation_completion::Status,
@@ -27,7 +31,7 @@ use temporal_sdk_core_protos::{
     },
 };
 use temporal_sdk_core_test_utils::{
-    CoreWfStarter, drain_pollers_and_shutdown, get_integ_server_options, get_integ_telem_options,
+    CoreWfStarter, drain_pollers_and_shutdown, get_integ_runtime_options, get_integ_server_options,
 };
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -35,7 +39,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn worker_validation_fails_on_nonexistent_namespace() {
     let opts = get_integ_server_options();
-    let runtime = CoreRuntime::new_assume_tokio(get_integ_telem_options()).unwrap();
+    let runtime = CoreRuntime::new_assume_tokio(get_integ_runtime_options(None)).unwrap();
     let retrying_client = opts
         .connect_no_namespace(runtime.telemetry().get_temporal_metric_meter())
         .await
@@ -200,4 +204,38 @@ async fn oversize_grpc_message() {
 #[tokio::test]
 async fn grpc_message_too_large_test() {
     shared_tests::grpc_message_too_large().await
+}
+
+#[tokio::test]
+async fn worker_heartbeat() {
+    let wf_name = "worker_heartbeat";
+    let opts = get_integ_server_options();
+    let runtime =
+        CoreRuntime::new_assume_tokio(get_integ_runtime_options(Some(Duration::from_millis(100))))
+            .unwrap();
+
+    let mut starter = CoreWfStarter::new_with_runtime(wf_name, runtime);
+    let mut worker = starter.worker().await;
+
+    worker.register_activity("sleeper", |ctx: ActContext, str: String| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(str)
+    });
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.activity(ActivityOptions {
+            activity_type: "sleeper".to_string(),
+            input: "sleep".as_json_payload().expect("serializes fine"),
+            schedule_to_close_timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        })
+        .await;
+        Ok(().into())
+    });
+    starter.start_with_worker(wf_name, &mut worker).await;
+    worker.run_until_done().await.unwrap();
+
+    for a in starter.get_history().await.events {
+        println!("[e] {:?}", a);
+    }
+    panic!("panicing to show prints");
 }
