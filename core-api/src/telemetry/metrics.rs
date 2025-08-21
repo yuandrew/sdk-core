@@ -1,4 +1,5 @@
 use crate::dbg_panic;
+use std::backtrace::Backtrace;
 use std::{
     any::Any,
     borrow::Cow,
@@ -26,6 +27,23 @@ pub trait CoreMeter: Send + Sync + Debug {
         attribs: NewAttributes,
     ) -> MetricAttributes;
     fn counter(&self, params: MetricParameters) -> Counter;
+
+    /// Create a counter with in-memory tracking for dual metrics reporting
+    fn counter_with_in_memory(
+        &self,
+        params: MetricParameters,
+        in_memory_meter: &dyn CoreMeter,
+    ) -> Counter {
+        // Get the underlying metric implementations
+        let primary_counter = self.counter(params.clone());
+        let in_memory_counter = in_memory_meter.counter(params);
+
+        Counter::new_with_in_memory(
+            primary_counter.primary.metric.clone(),
+            in_memory_counter.primary.metric.clone(),
+        )
+    }
+
     fn histogram(&self, params: MetricParameters) -> Histogram;
     fn histogram_f64(&self, params: MetricParameters) -> HistogramF64;
     /// Create a histogram which records Durations. Implementations should choose to emit in
@@ -227,26 +245,75 @@ impl<T, B> LazyBoundMetric<T, B> {
 pub trait CounterBase: Send + Sync {
     fn adds(&self, value: u64);
 }
-pub type Counter = LazyBoundMetric<
-    Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
-    Arc<dyn CounterBase>,
->;
+
+#[derive(Clone)]
+pub struct Counter {
+    primary: LazyBoundMetric<
+        Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+        Arc<dyn CounterBase>,
+    >,
+    in_memory: Option<
+        LazyBoundMetric<
+            Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+            Arc<dyn CounterBase>,
+        >,
+    >,
+}
 impl Counter {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>) -> Self {
         Self {
-            metric: inner,
-            attributes: MetricAttributes::Empty,
-            bound_cache: OnceLock::new(),
+            primary: LazyBoundMetric {
+                metric: inner,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: None,
         }
     }
+
+    pub fn new_with_in_memory(
+        primary: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+        in_memory: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+    ) -> Self {
+        Self {
+            primary: LazyBoundMetric {
+                metric: primary,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: Some(LazyBoundMetric {
+                metric: in_memory,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            }),
+        }
+    }
+
     pub fn add(&self, value: u64, attributes: &MetricAttributes) {
-        match self.metric.with_attributes(attributes) {
-            Ok(base) => {
-                base.adds(value);
-            }
+        match self.primary.metric.with_attributes(attributes) {
+            Ok(base) => base.adds(value),
             Err(e) => {
-                dbg_panic!("Failed to initialize metric, will drop values: {e:?}",);
+                dbg_panic!("Failed to initialize primary metric, will drop values: {e:?}");
             }
+        }
+
+        if let Some(ref in_mem) = self.in_memory {
+            match in_mem.metric.with_attributes(attributes) {
+                Ok(base) => base.adds(value),
+                Err(e) => {
+                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
+                }
+            }
+        }
+    }
+
+    pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
+        self.primary.attributes = new_attributes.clone();
+        self.primary.bound_cache = OnceLock::new();
+
+        if let Some(ref mut in_mem) = self.in_memory {
+            in_mem.attributes = new_attributes;
+            in_mem.bound_cache = OnceLock::new();
         }
     }
 }
@@ -254,16 +321,38 @@ impl CounterBase for Counter {
     fn adds(&self, value: u64) {
         // TODO: Replace all of these with below when stable
         //   https://doc.rust-lang.org/std/sync/struct.OnceLock.html#method.get_or_try_init
-        let bound = self.bound_cache.get_or_init(|| {
-            self.metric
-                .with_attributes(&self.attributes)
+        let bound = self.primary.bound_cache.get_or_init(|| {
+            self.primary
+                .metric
+                .with_attributes(&self.primary.attributes)
                 .map(Into::into)
                 .unwrap_or_else(|e| {
-                    dbg_panic!("Failed to initialize metric, will drop values: {e:?}");
+                    dbg_panic!("Failed to initialize primary metric, will drop values: {e:?}");
                     Arc::new(NoOpInstrument) as Arc<dyn CounterBase>
                 })
         });
         bound.adds(value);
+
+        // let bt = Backtrace::force_capture();
+
+        // println!("BT{:?}", bt);
+        if let Some(ref in_mem) = self.in_memory {
+            println!("pre-bound, adding to in-memory counter");
+            let bound = in_mem.bound_cache.get_or_init(|| {
+                in_mem
+                    .metric
+                    .with_attributes(&in_mem.attributes)
+                    .map(Into::into)
+                    .unwrap_or_else(|e| {
+                        dbg_panic!(
+                            "Failed to initialize in-memory metric, will drop values: {e:?}"
+                        );
+                        Arc::new(NoOpInstrument) as Arc<dyn CounterBase>
+                    })
+            });
+            println!("bound");
+            bound.adds(value);
+        }
     }
 }
 impl MetricAttributable<Counter> for Counter {
@@ -271,11 +360,23 @@ impl MetricAttributable<Counter> for Counter {
         &self,
         attributes: &MetricAttributes,
     ) -> Result<Counter, Box<dyn std::error::Error>> {
-        Ok(Self {
-            metric: self.metric.clone(),
+        let primary = LazyBoundMetric {
+            metric: self.primary.metric.clone(),
             attributes: attributes.clone(),
             bound_cache: OnceLock::new(),
-        })
+        };
+
+        let in_memory = if let Some(ref in_mem) = self.in_memory {
+            Some(LazyBoundMetric {
+                metric: in_mem.metric.clone(),
+                attributes: attributes.clone(),
+                bound_cache: OnceLock::new(),
+            })
+        } else {
+            None
+        };
+
+        Ok(Counter { primary, in_memory })
     }
 }
 

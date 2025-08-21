@@ -1,6 +1,8 @@
 //! This module helps with the initialization and management of telemetry. IE: Metrics and tracing.
 //! Logs from core are all traces, which may be exported to the console, in memory, or externally.
 
+#[cfg(feature = "otel")]
+mod in_memory;
 mod log_export;
 pub(crate) mod metrics;
 #[cfg(feature = "otel")]
@@ -25,11 +27,16 @@ pub use otel::build_otlp_metric_exporter;
 #[cfg(feature = "prom")]
 pub use prometheus_server::start_prometheus_metric_exporter;
 
+// TODO: Clean up?
+#[cfg(feature = "otel")]
+pub use in_memory::InMemoryMeter;
+
 pub use log_export::{CoreLogBuffer, CoreLogBufferedConsumer, CoreLogStreamConsumer};
 
 use crate::telemetry::{log_export::CoreLogConsumerLayer, metrics::PrefixedMetricsMeter};
 use itertools::Itertools;
 use parking_lot::Mutex;
+use std::fmt::Debug;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -67,6 +74,7 @@ pub struct TelemetryInstance {
     /// the user has not opted into any tracing configuration.
     trace_subscriber: Option<Arc<dyn Subscriber + Send + Sync>>,
     attach_service_name: bool,
+    in_memory_meter: Option<Arc<InMemoryMeter>>,
 }
 
 impl TelemetryInstance {
@@ -83,6 +91,7 @@ impl TelemetryInstance {
             metrics,
             trace_subscriber,
             attach_service_name,
+            in_memory_meter: None,
         }
     }
 
@@ -95,7 +104,8 @@ impl TelemetryInstance {
 
     /// Some metric meters cannot be initialized until after a tokio runtime has started and after
     /// other telemetry has initted (ex: prometheus). They can be attached here.
-    pub fn attach_late_init_metrics(&mut self, meter: Arc<dyn CoreMeter + 'static>) {
+    pub fn attach_late_init_metrics(&mut self, meter: Arc<dyn CoreMeterWithMem + 'static>) {
+        self.in_memory_meter = Some(meter.in_memory_meter().clone());
         self.metrics = Some(meter);
     }
 
@@ -129,6 +139,10 @@ impl TelemetryInstance {
         } else {
             vec![]
         }
+    }
+
+    pub fn in_memory_meter(&self) -> Option<Arc<InMemoryMeter>> {
+        self.in_memory_meter.clone()
     }
 }
 
@@ -304,4 +318,8 @@ where
     fn display(&self) -> String {
         format!("[{}]", self.iter().format(","))
     }
+}
+
+pub trait CoreMeterWithMem: CoreMeter + Send + Sync + Debug {
+    fn in_memory_meter(&self) -> Arc<InMemoryMeter>;
 }

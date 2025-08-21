@@ -20,6 +20,8 @@ pub(crate) use activities::{
 pub(crate) use wft_poller::WFTPollerShared;
 pub(crate) use workflow::LEGACY_QUERY_ID;
 
+use crate::telemetry::InMemoryMeter;
+use crate::telemetry::metrics::STICKY_CACHE_SIZE_NAME;
 use crate::worker::heartbeat::HeartbeatFn;
 use crate::{
     ActivityHeartbeat, CompleteActivityError, PollError, WorkerTrait,
@@ -66,7 +68,7 @@ use temporal_sdk_core_api::{
     errors::{CompleteNexusError, WorkerValidationError},
     worker::PollerBehavior,
 };
-use temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHostInfo;
+use temporal_sdk_core_protos::temporal::api::worker::v1::{WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo};
 use temporal_sdk_core_protos::{
     TaskToken,
     coresdk::{
@@ -97,6 +99,11 @@ use {
         PollActivityTaskQueueResponse, PollNexusTaskQueueResponse,
     },
 };
+// use opentelemetry_sdk::metrics::data::{Aggregation, Gauge, Sum};
+use opentelemetry_sdk::metrics::Aggregation;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+use temporal_sdk_core_api::worker::WorkerDeploymentVersion;
+use temporal_sdk_core_protos::temporal::api::deployment;
 
 /// A worker polls on a certain task queue
 pub struct Worker {
@@ -287,7 +294,7 @@ impl Worker {
         sticky_queue_name: Option<String>,
         client: Arc<dyn WorkerClient>,
         telem_instance: Option<&TelemetryInstance>,
-        shared_namespace_worker: bool,
+        in_memory_meter: Option<Arc<InMemoryMeter>>,
     ) -> Self {
         info!(task_queue=%config.task_queue, namespace=%config.namespace, "Initializing worker");
 
@@ -297,7 +304,7 @@ impl Worker {
             client,
             TaskPollers::Real,
             telem_instance,
-            shared_namespace_worker,
+            in_memory_meter,
         )
     }
 
@@ -318,7 +325,7 @@ impl Worker {
 
     #[cfg(test)]
     pub(crate) fn new_test(config: WorkerConfig, client: impl WorkerClient + 'static) -> Self {
-        Self::new(config, None, Arc::new(client), None, false)
+        Self::new(config, None, Arc::new(client), None, None)
     }
 
     pub(crate) fn new_with_pollers(
@@ -327,8 +334,9 @@ impl Worker {
         client: Arc<dyn WorkerClient>,
         task_pollers: TaskPollers,
         telem_instance: Option<&TelemetryInstance>,
-        shared_namespace_worker: bool,
+        in_memory_meter: Option<Arc<InMemoryMeter>>,
     ) -> Self {
+        let shared_namespace_worker = in_memory_meter.is_none();
         let (metrics, meter) = if let Some(ti) = telem_instance {
             (
                 MetricsContext::top_level(config.namespace.clone(), config.task_queue.clone(), ti),
@@ -508,17 +516,84 @@ impl Worker {
         let worker_key = Mutex::new(client.workers().register(Box::new(provider)));
         let sdk_name_and_ver = client.sdk_name_and_version();
 
-        let worker_heartbeat = if !shared_namespace_worker {
+        let worker_heartbeat = if let Some(in_mem_meter) = in_memory_meter {
             let worker_instance_key = Uuid::new_v4().to_string();
             let worker_instance_key_clone = worker_instance_key.clone();
             let worker_identity = client.get_identity();
             let task_queue = config.task_queue.clone();
             let sdk_name_and_ver = sdk_name_and_ver.clone();
+            let deployment_version = config.computed_deployment_version();
+            let deployment_version = deployment_version.map(|dv| deployment::v1::WorkerDeploymentVersion {
+                deployment_name: dv.deployment_name,
+                build_id: dv.build_id,
+            });
 
-            // TODO: poller info
-
-            // TODO: slots info
             let worker_heartbeat_callback: HeartbeatFn = Arc::new(move || {
+                let mut sticky_cache_size = 0;
+                let mut total_sticky_cache_hit = 0;
+                let mut total_sticky_cache_miss = 0;
+
+                // TODO: poller info
+                let workflow_poller_info = WorkerPollerInfo {
+                    current_pollers: 0,
+                    last_successful_poll_time: None,
+                    is_autoscaling: false,
+                };
+
+                // TODO: slots info
+                let workflow_task_slots_info = WorkerSlotsInfo {
+                    current_available_slots: 0,
+                    current_used_slots: 0,
+                    slot_supplier_kind: "".to_string(),
+                    total_processed_tasks: 0,
+                    total_failed_tasks: 0,
+                    last_interval_processed_tasks: 0,
+                    last_interval_failure_tasks: 0,
+                };
+
+                let metrics = in_mem_meter.get_metrics().unwrap();
+                // println!("metrics {:?}", metrics.len());
+                for metric in metrics {
+                    // println!("\tmetric {:?}", metric);
+                    for sm in metric.scope_metrics() {
+                        // println!("\t\tscope {:?}", sm.scope());
+                        for m in sm.metrics() {
+                            //     println!("m.name {:?}", m.name());
+                            if m.name() == STICKY_CACHE_SIZE_NAME
+                                && let AggregatedMetrics::U64(MetricData::Gauge(
+                                    gauge_data,
+                                )) = m.data()
+                            {
+                                // TODO: Defensive program against if size > 1?
+                                for data_point in gauge_data.data_points() {
+                                    println!("A");
+                                    sticky_cache_size = data_point.value();
+                                    break;
+                                }
+                            } else if m.name() == "sticky_cache_hit"
+                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) =
+                                    m.data()
+                            {
+                                // TODO: Defensive program against if size > 1?
+                                for data_point in sum_data.data_points() {
+                                    total_sticky_cache_hit = data_point.value();
+                                    break;
+                                }
+                            } else if m.name() == "sticky_cache_miss"
+                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) =
+                                    m.data()
+                            {
+                                // TODO: Defensive program against if size > 1?
+                                for data_point in sum_data.data_points() {
+                                    println!("C");
+                                    total_sticky_cache_miss = data_point.value();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat {
                     worker_instance_key: worker_instance_key_clone.clone(),
                     worker_identity: worker_identity.clone(),
@@ -528,25 +603,27 @@ impl Worker {
                         ..Default::default()
                     }),
                     task_queue: task_queue.clone(),
-                    deployment_version: None,
+                    deployment_version: deployment_version.clone(),
                     sdk_name: sdk_name_and_ver.clone().0,
                     sdk_version: sdk_name_and_ver.clone().1,
-                    status: 0,
+                    status: 0, // TODO
                     start_time: Some(std::time::SystemTime::now().into()),
-                    workflow_task_slots_info: None,
-                    activity_task_slots_info: None,
-                    nexus_task_slots_info: None,
-                    local_activity_slots_info: None,
-                    workflow_poller_info: None,
-                    workflow_sticky_poller_info: None,
-                    activity_poller_info: None,
-                    nexus_poller_info: None,
-                    // TODO: requires the metrics changes to double count
-                    total_sticky_cache_hit: 0,
-                    total_sticky_cache_miss: 0,
-                    current_sticky_cache_size: 0,
+                    workflow_task_slots_info: None, // TODO
+                    activity_task_slots_info: None, // TODO
+                    nexus_task_slots_info: None, // TODO
+                    local_activity_slots_info: None, // TODO
+                    workflow_poller_info: None, // TODO
+                    workflow_sticky_poller_info: None, // TODO
+                    activity_poller_info: None, // TODO
+                    nexus_poller_info: None, // TODO
+                    total_sticky_cache_hit: total_sticky_cache_hit as i32,
+                    total_sticky_cache_miss: total_sticky_cache_miss as i32,
+                    current_sticky_cache_size: sticky_cache_size as i32,
                     plugins: vec![],
-                    ..Default::default()
+
+                    // These values are set at heartbeat time by SharedNamespaceWorker
+                    heartbeat_time: None,
+                    elapsed_since_last_heartbeat: None,
                 }
             });
 

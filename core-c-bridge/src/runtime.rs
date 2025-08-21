@@ -18,7 +18,9 @@ use temporal_sdk_core::CoreRuntime;
 use temporal_sdk_core::RuntimeOptions as CoreRuntimeOptions;
 use temporal_sdk_core::RuntimeOptionsBuilder as CoreRuntimeOptionsBuilder;
 use temporal_sdk_core::TokioRuntimeBuilder;
-use temporal_sdk_core::telemetry::{build_otlp_metric_exporter, start_prometheus_metric_exporter};
+use temporal_sdk_core::telemetry::{
+    CoreMeterWithMem, build_otlp_metric_exporter, start_prometheus_metric_exporter,
+};
 use temporal_sdk_core_api::telemetry::HistogramBucketOverrides;
 use temporal_sdk_core_api::telemetry::MetricTemporality;
 use temporal_sdk_core_api::telemetry::metrics::CoreMeter;
@@ -385,7 +387,7 @@ pub extern "C" fn temporal_core_forwarded_log_fields_json(
 fn create_meter(
     options: &MetricsOptions,
     custom_meter: Option<CustomMetricMeterRef>,
-) -> anyhow::Result<Arc<dyn CoreMeter>> {
+) -> anyhow::Result<Arc<dyn CoreMeterWithMem>> {
     // OTel, Prom, or custom
     if let Some(otel_options) = unsafe { options.opentelemetry.as_ref() } {
         if !options.prometheus.is_null() || custom_meter.is_some() {
@@ -415,28 +417,29 @@ fn create_meter(
             ));
         }
         Ok(Arc::new(build_otlp_metric_exporter(build.build()?)?))
-    } else if let Some(prom_options) = unsafe { options.prometheus.as_ref() } {
-        if custom_meter.is_some() {
-            return Err(anyhow::anyhow!(
-                "Cannot have Prometheus metrics and custom meter"
-            ));
-        }
-        // Start prom exporter
-        let mut build = PrometheusExporterOptionsBuilder::default();
-        build
-            .socket_addr(SocketAddr::from_str(prom_options.bind_address.to_str())?)
-            .global_tags(options.global_tags.to_string_map_on_newlines())
-            .counters_total_suffix(prom_options.counters_total_suffix)
-            .unit_suffix(prom_options.unit_suffix)
-            .use_seconds_for_durations(prom_options.durations_as_seconds)
-            .histogram_bucket_overrides(HistogramBucketOverrides {
-                overrides: parse_histogram_bucket_overrides(
-                    &prom_options.histogram_bucket_overrides,
-                )?,
-            });
-        Ok(start_prometheus_metric_exporter(build.build()?)?.meter)
-    } else if let Some(custom_meter) = custom_meter {
-        Ok(Arc::new(custom_meter))
+        // TODO:
+        // } else if let Some(prom_options) = unsafe { options.prometheus.as_ref() } {
+        //     if custom_meter.is_some() {
+        //         return Err(anyhow::anyhow!(
+        //             "Cannot have Prometheus metrics and custom meter"
+        //         ));
+        //     }
+        //     // Start prom exporter
+        //     let mut build = PrometheusExporterOptionsBuilder::default();
+        //     build
+        //         .socket_addr(SocketAddr::from_str(prom_options.bind_address.to_str())?)
+        //         .global_tags(options.global_tags.to_string_map_on_newlines())
+        //         .counters_total_suffix(prom_options.counters_total_suffix)
+        //         .unit_suffix(prom_options.unit_suffix)
+        //         .use_seconds_for_durations(prom_options.durations_as_seconds)
+        //         .histogram_bucket_overrides(HistogramBucketOverrides {
+        //             overrides: parse_histogram_bucket_overrides(
+        //                 &prom_options.histogram_bucket_overrides,
+        //             )?,
+        //         });
+        //     Ok(start_prometheus_metric_exporter(build.build()?)?.meter)
+        // } else if let Some(custom_meter) = custom_meter {
+        //     Ok(Arc::new(custom_meter))
     } else {
         Err(anyhow::anyhow!(
             "Either OpenTelemetry config, Prometheus config, or custom meter must be provided"

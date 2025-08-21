@@ -1,5 +1,5 @@
 use super::{
-    TELEM_SERVICE_NAME, default_buckets_for,
+    CoreMeterWithMem, InMemoryMeter, TELEM_SERVICE_NAME, default_buckets_for,
     metrics::{
         ACTIVITY_EXEC_LATENCY_HISTOGRAM_NAME, ACTIVITY_SCHED_TO_START_LATENCY_HISTOGRAM_NAME,
         DEFAULT_MS_BUCKETS, WORKFLOW_E2E_LATENCY_HISTOGRAM_NAME,
@@ -14,6 +14,7 @@ use opentelemetry::{
     metrics::{Meter, MeterProvider as MeterProviderT},
 };
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
+use opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder;
 use opentelemetry_sdk::{
     Resource, metrics,
     metrics::{
@@ -146,20 +147,41 @@ pub fn build_otlp_metric_exporter(
             .with_temporality(metric_temporality_to_temporality(opts.metric_temporality))
             .build()?,
     };
+    let in_mem_exporter = InMemoryMetricExporterBuilder::default()
+        .with_temporality(metric_temporality_to_temporality(opts.metric_temporality))
+        .build();
     let reader = PeriodicReader::builder(exporter)
+        .with_interval(opts.metric_periodicity)
+        .build();
+    let in_mem_reader = PeriodicReader::builder(in_mem_exporter.clone())
         .with_interval(opts.metric_periodicity)
         .build();
     let mp = augment_meter_provider_with_defaults(
         MeterProviderBuilder::default().with_reader(reader),
         &opts.global_tags,
         opts.use_seconds_for_durations,
+        opts.histogram_bucket_overrides.clone(),
+    )?
+    .build();
+
+    let in_mem_mp = augment_meter_provider_with_defaults(
+        MeterProviderBuilder::default().with_reader(in_mem_reader),
+        &opts.global_tags,
+        opts.use_seconds_for_durations,
         opts.histogram_bucket_overrides,
     )?
     .build();
+    let in_mem_meter = Arc::new(InMemoryMeter::new(
+        in_mem_exporter,
+        in_mem_mp.meter(TELEM_SERVICE_NAME),
+        in_mem_mp,
+    ));
+
     Ok::<_, anyhow::Error>(CoreOtelMeter {
         meter: mp.meter(TELEM_SERVICE_NAME),
         use_seconds_for_durations: opts.use_seconds_for_durations,
         _mp: mp,
+        in_mem_meter,
     })
 }
 
@@ -170,6 +192,7 @@ pub struct CoreOtelMeter {
     // we have to hold on to the provider otherwise otel automatically shuts it down on drop
     // for whatever crazy reason
     _mp: SdkMeterProvider,
+    pub in_mem_meter: Arc<InMemoryMeter>,
 }
 
 impl CoreMeter for CoreOtelMeter {
@@ -242,6 +265,12 @@ impl CoreMeter for CoreOtelMeter {
     }
 }
 
+impl CoreMeterWithMem for CoreOtelMeter {
+    fn in_memory_meter(&self) -> Arc<InMemoryMeter> {
+        self.in_mem_meter.clone()
+    }
+}
+
 impl CoreOtelMeter {
     fn create_histogram(&self, params: MetricParameters) -> opentelemetry::metrics::Histogram<u64> {
         self.meter
@@ -263,7 +292,7 @@ impl CoreOtelMeter {
     }
 }
 
-enum DurationHistogram {
+pub(crate) enum DurationHistogram {
     Milliseconds(opentelemetry::metrics::Histogram<u64>),
     Seconds(opentelemetry::metrics::Histogram<f64>),
 }

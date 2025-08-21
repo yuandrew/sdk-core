@@ -1,5 +1,6 @@
 use crate::{abstractions::dbg_panic, telemetry::TelemetryInstance};
 
+use crate::telemetry::in_memory::InMemoryMeter;
 use std::{
     fmt::{Debug, Display},
     iter::Iterator,
@@ -68,7 +69,7 @@ impl MetricsContext {
     pub(crate) fn no_op() -> Self {
         let meter = Arc::new(NoOpCoreMeter);
         let kvs = meter.new_attributes(Default::default());
-        let instruments = Arc::new(Instruments::new(meter.as_ref()));
+        let instruments = Arc::new(Instruments::new(meter.as_ref(), None));
         Self {
             kvs,
             instruments,
@@ -84,7 +85,11 @@ impl MetricsContext {
                 .push(MetricKeyValue::new(KEY_NAMESPACE, namespace));
             meter.default_attribs.attributes.push(task_queue(tq));
             let kvs = meter.inner.new_attributes(meter.default_attribs);
-            let mut instruments = Instruments::new(meter.inner.as_ref());
+            let in_memory_meter = telemetry.in_memory_meter();
+            let mut instruments = Instruments::new(
+                meter.inner.as_ref(),
+                in_memory_meter.as_deref().map(|m| m as &dyn CoreMeter),
+            );
             instruments.update_attributes(&kvs);
             Self {
                 kvs,
@@ -268,11 +273,13 @@ impl MetricsContext {
 
     /// A workflow task found a cached workflow to run against
     pub(crate) fn sticky_cache_hit(&self) {
+        println!("self.instruments.sticky_cache_hit.adds(1);");
         self.instruments.sticky_cache_hit.adds(1);
     }
 
     /// A workflow task did not find a cached workflow
     pub(crate) fn sticky_cache_miss(&self) {
+        println!("self.instruments.sticky_cache_miss.adds(1);");
         self.instruments.sticky_cache_miss.adds(1);
     }
 
@@ -288,7 +295,28 @@ impl MetricsContext {
 }
 
 impl Instruments {
-    fn new(meter: &dyn CoreMeter) -> Self {
+    fn new(meter: &dyn CoreMeter, in_mem_meter: Option<&dyn CoreMeter>) -> Self {
+        let create_counter = |params: MetricParameters| -> Counter {
+            match in_mem_meter {
+                Some(in_mem) => meter.counter_with_in_memory(params, in_mem),
+                None => meter.counter(params),
+            }
+        };
+
+        let sticky_cache_hit = create_counter(MetricParameters {
+            name: "sticky_cache_hit".into(),
+            description: "Count of times the workflow cache was used for a new workflow task"
+                .into(),
+            unit: "".into(),
+        });
+
+        let sticky_cache_miss = create_counter(MetricParameters {
+            name: "sticky_cache_miss".into(),
+            description:
+                "Count of times the workflow cache was missing a workflow for a sticky task".into(),
+            unit: "".into(),
+        });
+
         Self {
             wf_completed_counter: meter.counter(MetricParameters {
                 name: "workflow_completed".into(),
@@ -449,19 +477,8 @@ impl Instruments {
                 description: "Current number of used slots per task type".into(),
                 unit: "".into(),
             }),
-            sticky_cache_hit: meter.counter(MetricParameters {
-                name: "sticky_cache_hit".into(),
-                description: "Count of times the workflow cache was used for a new workflow task"
-                    .into(),
-                unit: "".into(),
-            }),
-            sticky_cache_miss: meter.counter(MetricParameters {
-                name: "sticky_cache_miss".into(),
-                description:
-                    "Count of times the workflow cache was missing a workflow for a sticky task"
-                        .into(),
-                unit: "".into(),
-            }),
+            sticky_cache_hit,
+            sticky_cache_miss,
             sticky_cache_size: meter.gauge(MetricParameters {
                 name: STICKY_CACHE_SIZE_NAME.into(),
                 description: "Current number of cached workflows".into(),
@@ -640,7 +657,7 @@ pub const ACTIVITY_EXEC_LATENCY_HISTOGRAM_NAME: &str = "activity_execution_laten
 pub(super) const NUM_POLLERS_NAME: &str = "num_pollers";
 pub(super) const TASK_SLOTS_AVAILABLE_NAME: &str = "worker_task_slots_available";
 pub(super) const TASK_SLOTS_USED_NAME: &str = "worker_task_slots_used";
-pub(super) const STICKY_CACHE_SIZE_NAME: &str = "sticky_cache_size";
+pub(crate) const STICKY_CACHE_SIZE_NAME: &str = "sticky_cache_size";
 
 /// Track a failure metric if the failure is not a benign application failure.
 pub(crate) fn should_record_failure_metric(failure: &Option<Failure>) -> bool {

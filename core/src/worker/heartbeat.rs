@@ -1,6 +1,6 @@
 use crate::WorkerClient;
 use crate::abstractions::dbg_panic;
-use crate::telemetry::TelemetryInstance;
+use crate::telemetry::{InMemoryMeter, TelemetryInstance};
 use parking_lot::Mutex;
 use prost_types::Duration as PbDuration;
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ impl SharedNamespaceWorker {
             })
             .build()
             .expect("all required fields should be implemented");
-        let worker = crate::worker::Worker::new(config, None, client.clone(), telemetry, true);
+        let worker = crate::worker::Worker::new(config, None, client.clone(), telemetry, None);
 
         let last_heartbeat_time_map = Mutex::new(HashMap::new());
 
@@ -69,6 +69,7 @@ impl SharedNamespaceWorker {
                 }
                 tokio::select! {
                     _ = ticker.tick() => {
+                        println!("tick");
                         let mut hb_to_send = Vec::new();
                         for (instance_key, heartbeat_callback) in heartbeat_map_clone.lock().iter() {
                             let mut heartbeat = heartbeat_callback();
@@ -94,8 +95,10 @@ impl SharedNamespaceWorker {
 
                             last_heartbeat_time_map.insert(instance_key.clone(), now);
                         }
+                        println!("Sending worker heartbeat\n\t{:?}\n\t{:?}", hb_to_send[0].total_sticky_cache_hit, hb_to_send[0].total_sticky_cache_miss);
                         if let Err(e) = client_clone.record_worker_heartbeat(client_identity.namespace.clone(), client_identity.endpoint.clone(), hb_to_send
                             ).await {
+                            println!("Error sending worker heartbeat: {:?}", e);
                                 if matches!(
                                 e.code(),
                                 tonic::Code::Unimplemented
@@ -195,7 +198,7 @@ mod tests {
             .into();
 
         let client = Arc::new(mock);
-        let worker = worker::Worker::new(config, None, client.clone(), None, false);
+        let worker = worker::Worker::new(config, None, client.clone(), None, None);
 
         let namespace = "test-namespace".to_string();
         let task_queue_key = Uuid::new_v4();
