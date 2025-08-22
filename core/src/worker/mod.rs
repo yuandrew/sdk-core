@@ -527,29 +527,13 @@ impl Worker {
                 deployment_name: dv.deployment_name,
                 build_id: dv.build_id,
             });
+            let wft_slots_clone = wft_slots.clone();
+            let config_clone = config.clone();
 
             let worker_heartbeat_callback: HeartbeatFn = Arc::new(move || {
                 let mut sticky_cache_size = 0;
                 let mut total_sticky_cache_hit = 0;
                 let mut total_sticky_cache_miss = 0;
-
-                // TODO: poller info
-                let workflow_poller_info = WorkerPollerInfo {
-                    current_pollers: 0,
-                    last_successful_poll_time: None,
-                    is_autoscaling: false,
-                };
-
-                // TODO: slots info
-                let workflow_task_slots_info = WorkerSlotsInfo {
-                    current_available_slots: 0,
-                    current_used_slots: 0,
-                    slot_supplier_kind: "".to_string(),
-                    total_processed_tasks: 0,
-                    total_failed_tasks: 0,
-                    last_interval_processed_tasks: 0,
-                    last_interval_failure_tasks: 0,
-                };
 
                 let metrics = in_mem_meter.get_metrics().unwrap();
                 // println!("metrics {:?}", metrics.len());
@@ -558,11 +542,11 @@ impl Worker {
                     for sm in metric.scope_metrics() {
                         // println!("\t\tscope {:?}", sm.scope());
                         for m in sm.metrics() {
-                            //     println!("m.name {:?}", m.name());
+                            println!("m.name {:?}", m.name());
                             if m.name() == STICKY_CACHE_SIZE_NAME
                                 && let AggregatedMetrics::U64(MetricData::Gauge(
-                                    gauge_data,
-                                )) = m.data()
+                                                                  gauge_data,
+                                                              )) = m.data()
                             {
                                 // TODO: Defensive program against if size > 1?
                                 for data_point in gauge_data.data_points() {
@@ -572,7 +556,7 @@ impl Worker {
                                 }
                             } else if m.name() == "sticky_cache_hit"
                                 && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) =
-                                    m.data()
+                                m.data()
                             {
                                 // TODO: Defensive program against if size > 1?
                                 for data_point in sum_data.data_points() {
@@ -581,7 +565,7 @@ impl Worker {
                                 }
                             } else if m.name() == "sticky_cache_miss"
                                 && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) =
-                                    m.data()
+                                m.data()
                             {
                                 // TODO: Defensive program against if size > 1?
                                 for data_point in sum_data.data_points() {
@@ -589,10 +573,62 @@ impl Worker {
                                     total_sticky_cache_miss = data_point.value();
                                     break;
                                 }
+                            } else if m.name() == "num_pollers"
+                            {
+                                println!("m: {:?}", m);
+                                if let AggregatedMetrics::U64(MetricData::Gauge(
+                                                                  gauge_data,
+                                                              )) = m.data() {
+                                    println!("CORRECT");
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in gauge_data.data_points() {
+                                        println!("A");
+                                        sticky_cache_size = data_point.value();
+                                        break;
+                                    }
+                                }
+
                             }
                         }
                     }
                 }
+
+                // TODO: poller info
+                let workflow_poller_info = WorkerPollerInfo {
+                    current_pollers: 0, // TODO: Look at the labels for the num_pollers metric
+                    last_successful_poll_time: None,
+                    is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+                };
+
+                let workflow_sticky_poller_info = WorkerPollerInfo {
+                    current_pollers: 0,
+                    last_successful_poll_time: None,
+                    is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+                };
+
+                let activity_poller_info = WorkerPollerInfo {
+                    current_pollers: 0,
+                    last_successful_poll_time: None,
+                    is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
+                };
+
+                let nexus_poller_info = WorkerPollerInfo {
+                    current_pollers: 0,
+                    last_successful_poll_time: None,
+                    is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
+                };
+
+                // TODO: slots info
+                // let wft_current_available_slots = wft_slots_clone.available_permits().unwrap() as i32; // TODO: unwrap()
+                // let workflow_task_slots_info = WorkerSlotsInfo {
+                //     current_available_slots: wft_current_available_slots, // trait SlotSupplier.available_slots()
+                //     current_used_slots: wft_slots_clone.max_permits().unwrap() as i32 - wft_current_available_slots, // TODO: unwrap()
+                //     slot_supplier_kind: "".to_string(), // Possible values: "Fixed | ResourceBased | Custom String"
+                //     total_processed_tasks: 0,
+                //     total_failed_tasks: 0,
+                //     last_interval_processed_tasks: 0,
+                //     last_interval_failure_tasks: 0,
+                // };
 
                 temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat {
                     worker_instance_key: worker_instance_key_clone.clone(),

@@ -1384,8 +1384,7 @@ async fn runtime_new_otel() {
 
     let wf_name = "runtime_new_otel";
     let mut starter = CoreWfStarter::new_with_runtime(wf_name, rt);
-    // Disable cache to ensure replay happens completely
-    starter.worker_config.max_cached_workflows(0_usize);
+    starter.worker_config.max_cached_workflows(5_usize);
     // let worker = starter.get_worker().await;
     let mut worker = starter.worker().await;
     // let run_id = starter.start_wf().await;

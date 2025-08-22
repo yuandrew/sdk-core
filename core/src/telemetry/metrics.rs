@@ -303,19 +303,12 @@ impl Instruments {
             }
         };
 
-        let sticky_cache_hit = create_counter(MetricParameters {
-            name: "sticky_cache_hit".into(),
-            description: "Count of times the workflow cache was used for a new workflow task"
-                .into(),
-            unit: "".into(),
-        });
-
-        let sticky_cache_miss = create_counter(MetricParameters {
-            name: "sticky_cache_miss".into(),
-            description:
-                "Count of times the workflow cache was missing a workflow for a sticky task".into(),
-            unit: "".into(),
-        });
+        let create_gauge = |params: MetricParameters| -> Gauge {
+            match in_mem_meter {
+                Some(in_mem) => meter.gauge_with_in_memory(params, in_mem),
+                None => meter.gauge(params),
+            }
+        };
 
         Self {
             wf_completed_counter: meter.counter(MetricParameters {
@@ -462,7 +455,7 @@ impl Instruments {
                 description: "Count of the number of initialized workers".into(),
                 unit: "".into(),
             }),
-            num_pollers: meter.gauge(MetricParameters {
+            num_pollers: create_gauge(MetricParameters {
                 name: NUM_POLLERS_NAME.into(),
                 description: "Current number of active pollers per queue type".into(),
                 unit: "".into(),
@@ -477,9 +470,19 @@ impl Instruments {
                 description: "Current number of used slots per task type".into(),
                 unit: "".into(),
             }),
-            sticky_cache_hit,
-            sticky_cache_miss,
-            sticky_cache_size: meter.gauge(MetricParameters {
+            sticky_cache_hit: create_counter(MetricParameters {
+                name: "sticky_cache_hit".into(),
+                description: "Count of times the workflow cache was used for a new workflow task"
+                    .into(),
+                unit: "".into(),
+            }),
+            sticky_cache_miss: create_counter(MetricParameters {
+                name: "sticky_cache_miss".into(),
+                description:
+                "Count of times the workflow cache was missing a workflow for a sticky task".into(),
+                unit: "".into(),
+            }),
+            sticky_cache_size: create_gauge(MetricParameters {
                 name: STICKY_CACHE_SIZE_NAME.into(),
                 description: "Current number of cached workflows".into(),
                 unit: "".into(),

@@ -52,6 +52,23 @@ pub trait CoreMeter: Send + Sync + Debug {
     /// accordingly.
     fn histogram_duration(&self, params: MetricParameters) -> HistogramDuration;
     fn gauge(&self, params: MetricParameters) -> Gauge;
+
+    /// Create a gauge with in-memory tracking for dual metrics reporting
+    fn gauge_with_in_memory(
+        &self,
+        params: MetricParameters,
+        in_memory_meter: &dyn CoreMeter,
+    ) -> Gauge {
+        // Get the underlying metric implementations
+        let primary_gauge = self.gauge(params.clone());
+        let in_memory_gauge = in_memory_meter.gauge(params);
+
+        Gauge::new_with_in_memory(
+            primary_gauge.primary.metric.clone(),
+            in_memory_gauge.primary.metric.clone(),
+        )
+    }
+
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64;
 }
 
@@ -546,41 +563,107 @@ impl MetricAttributable<HistogramDuration> for HistogramDuration {
 pub trait GaugeBase: Send + Sync {
     fn records(&self, value: u64);
 }
-pub type Gauge = LazyBoundMetric<
-    Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
-    Arc<dyn GaugeBase>,
->;
+
+#[derive(Clone)]
+pub struct Gauge {
+    primary: LazyBoundMetric<
+        Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+        Arc<dyn GaugeBase>,
+    >,
+    in_memory: Option<
+        LazyBoundMetric<
+            Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+            Arc<dyn GaugeBase>,
+        >,
+    >,
+}
 impl Gauge {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>) -> Self {
         Self {
-            metric: inner,
-            attributes: MetricAttributes::Empty,
-            bound_cache: OnceLock::new(),
+            primary: LazyBoundMetric {
+                metric: inner,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: None,
         }
     }
+
+    pub fn new_with_in_memory(
+        primary: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+        in_memory: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+    ) -> Self {
+        Self {
+            primary: LazyBoundMetric {
+                metric: primary,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: Some(LazyBoundMetric {
+                metric: in_memory,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            }),
+        }
+    }
+
     pub fn record(&self, value: u64, attributes: &MetricAttributes) {
-        match self.metric.with_attributes(attributes) {
-            Ok(base) => {
-                base.records(value);
-            }
+        match self.primary.metric.with_attributes(attributes) {
+            Ok(base) => base.records(value),
             Err(e) => {
-                dbg_panic!("Failed to initialize metric, will drop values: {e:?}",);
+                dbg_panic!("Failed to initialize primary metric, will drop values: {e:?}");
             }
+        }
+
+        if let Some(ref in_mem) = self.in_memory {
+            match in_mem.metric.with_attributes(attributes) {
+                Ok(base) => base.records(value),
+                Err(e) => {
+                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
+                }
+            }
+        }
+    }
+
+    pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
+        self.primary.attributes = new_attributes.clone();
+        self.primary.bound_cache = OnceLock::new();
+
+        if let Some(ref mut in_mem) = self.in_memory {
+            in_mem.attributes = new_attributes;
+            in_mem.bound_cache = OnceLock::new();
         }
     }
 }
 impl GaugeBase for Gauge {
     fn records(&self, value: u64) {
-        let bound = self.bound_cache.get_or_init(|| {
-            self.metric
-                .with_attributes(&self.attributes)
+        let bound = self.primary.bound_cache.get_or_init(|| {
+            self.primary
+                .metric
+                .with_attributes(&self.primary.attributes)
                 .map(Into::into)
                 .unwrap_or_else(|e| {
-                    dbg_panic!("Failed to initialize metric, will drop values: {e:?}");
+                    dbg_panic!("Failed to initialize primary metric, will drop values: {e:?}");
                     Arc::new(NoOpInstrument) as Arc<dyn GaugeBase>
                 })
         });
         bound.records(value);
+
+        if let Some(ref in_mem) = self.in_memory {
+            let bound = in_mem.bound_cache.get_or_init(|| {
+                in_mem
+                    .metric
+                    .with_attributes(&in_mem.attributes)
+                    .map(Into::into)
+                    .unwrap_or_else(|e| {
+                        dbg_panic!(
+                            "Failed to initialize in-memory metric, will drop values: {e:?}"
+                        );
+                        Arc::new(NoOpInstrument) as Arc<dyn GaugeBase>
+                    })
+            });
+            bound.records(value);
+        }
     }
 }
 impl MetricAttributable<Gauge> for Gauge {
@@ -588,11 +671,23 @@ impl MetricAttributable<Gauge> for Gauge {
         &self,
         attributes: &MetricAttributes,
     ) -> Result<Gauge, Box<dyn std::error::Error>> {
-        Ok(Self {
-            metric: self.metric.clone(),
+        let primary = LazyBoundMetric {
+            metric: self.primary.metric.clone(),
             attributes: attributes.clone(),
             bound_cache: OnceLock::new(),
-        })
+        };
+
+        let in_memory = if let Some(ref in_mem) = self.in_memory {
+            Some(LazyBoundMetric {
+                metric: in_mem.metric.clone(),
+                attributes: attributes.clone(),
+                bound_cache: OnceLock::new(),
+            })
+        } else {
+            None
+        };
+
+        Ok(Gauge { primary, in_memory })
     }
 }
 
