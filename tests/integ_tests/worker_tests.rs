@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use temporal_client::WorkflowOptions;
+use temporal_client::{ClientOptionsBuilder, WorkflowOptions};
 use temporal_sdk::{
     ActContext, ActivityError, ActivityOptions, WfContext, interceptors::WorkerInterceptor,
 };
@@ -30,11 +30,12 @@ use temporal_sdk_core_protos::{
         history::v1::history_event::Attributes::WorkflowTaskFailedEventAttributes,
     },
 };
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, drain_pollers_and_shutdown, get_integ_runtime_options, get_integ_server_options,
-};
+use temporal_sdk_core_test_utils::{CoreWfStarter, drain_pollers_and_shutdown, get_integ_runtime_options, get_integ_server_options, NAMESPACE, default_cached_download, init_integ_telem, integ_worker_config};
 use tokio::sync::Notify;
+use tracing::info;
+use url::Url;
 use uuid::Uuid;
+use temporal_sdk_core::ephemeral_server::TemporalDevServerConfigBuilder;
 
 #[tokio::test]
 async fn worker_validation_fails_on_nonexistent_namespace() {
@@ -209,7 +210,6 @@ async fn grpc_message_too_large_test() {
 #[tokio::test]
 async fn worker_heartbeat() {
     let wf_name = "worker_heartbeat";
-    let opts = get_integ_server_options();
     let runtime =
         CoreRuntime::new_assume_tokio(get_integ_runtime_options(Some(Duration::from_millis(100))))
             .unwrap();
@@ -237,5 +237,113 @@ async fn worker_heartbeat() {
     for a in starter.get_history().await.events {
         println!("[e] {:?}", a);
     }
+    panic!("panicing to show prints");
+}
+
+#[tokio::test]
+async fn worker_heartbeat_replace_client() {
+    // This test prints "client: {:?}" for each heartbeat. Should see the identity change once we
+    // replace the client
+    let wf_name = "worker_heartbeat";
+    let runtime =
+        CoreRuntime::new_assume_tokio(get_integ_runtime_options(Some(Duration::from_millis(100))))
+            .unwrap();
+    let mut opts = get_integ_server_options();
+    opts.identity = "integ_tester1".to_owned();
+
+
+    let server_config = TemporalDevServerConfigBuilder::default()
+        .exe(default_cached_download())
+        // We need to lower the poll timeout so the poll call rolls over
+        .extra_args(vec![
+            "--dynamic-config-value".to_string(),
+            "frontend.WorkerHeartbeatsEnabled=true".to_string(),
+        ])
+        .build()
+        .unwrap();
+    let mut server1 = server_config.start_server().await.unwrap();
+    info!("Connecting clients");
+    let mut client_common_config = ClientOptionsBuilder::default();
+    client_common_config
+        .identity("integ_tester".to_owned())
+        .client_name("temporal-core".to_owned())
+        .client_version("0.1.0".to_owned());
+    let client1 = client_common_config
+        .clone()
+        .target_url(Url::parse(&format!("http://{}", server1.target)).unwrap())
+        .build()
+        .unwrap()
+        .connect("default", None)
+        .await
+        .unwrap();
+    client_common_config.identity("integ_tester2".to_owned());
+    let client2 = client_common_config
+        .clone()
+        .target_url(Url::parse(&format!("http://{}", server1.target)).unwrap())
+        .build()
+        .unwrap()
+        .connect("default", None)
+        .await
+        .unwrap();
+    let worker = init_worker(
+        init_integ_telem().unwrap(),
+        integ_worker_config("my-task-queue")
+            // We want a cache so we don't get extra remove-job activations
+            .max_cached_workflows(100_usize)
+            .build()
+            .unwrap(),
+        client1.clone(),
+    )
+        .unwrap();
+
+    println!("sleeping for 200ms");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    println!("replacing client");
+    worker.replace_client(client2.get_client().inner().clone());
+
+    println!("sleeping for 200ms");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // let client2 = Arc::new(
+    //     get_integ_server_options()
+    //         .connect(
+    //             NAMESPACE,
+    //             runtime.telemetry().get_temporal_metric_meter(),
+    //         )
+    //         .await
+    //         .expect("Must connect"),
+    // );
+
+    // let runtime =
+    //     CoreRuntime::new_assume_tokio(get_integ_runtime_options(Some(Duration::from_millis(100))))
+    //         .unwrap();
+    // let mut starter = CoreWfStarter::new_with_runtime(wf_name, runtime);
+
+    // let mut worker = starter.worker().await;
+    //
+
+    //
+    //
+    // worker.register_activity("sleeper", |ctx: ActContext, str: String| async move {
+    //     tokio::time::sleep(Duration::from_secs(1)).await;
+    //     Ok(str)
+    // });
+    // worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+    //     ctx.activity(ActivityOptions {
+    //         activity_type: "sleeper".to_string(),
+    //         input: "sleep".as_json_payload().expect("serializes fine"),
+    //         schedule_to_close_timeout: Some(Duration::from_secs(5)),
+    //         ..Default::default()
+    //     })
+    //         .await;
+    //     Ok(().into())
+    // });
+    // starter.start_with_worker(wf_name, &mut worker).await;
+    // worker.run_until_done().await.unwrap();
+    //
+    // for a in starter.get_history().await.events {
+    //     println!("[e] {:?}", a);
+    // }
     panic!("panicing to show prints");
 }

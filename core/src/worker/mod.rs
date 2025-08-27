@@ -97,6 +97,7 @@ use {
         PollActivityTaskQueueResponse, PollNexusTaskQueueResponse,
     },
 };
+use crate::worker::client::WorkerClientWithHeartbeat;
 
 /// A worker polls on a certain task queue
 pub struct Worker {
@@ -149,6 +150,12 @@ struct WorkerHeartbeat {
     /// Used to remove this worker from the parent map used to track this worker for
     /// worker heartbeat
     shutdown_callback: OnceCell<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl WorkerHeartbeat {
+    fn replace_client(client:  Arc<dyn WorkerClientWithHeartbeat>) {
+
+    }
 }
 
 #[async_trait::async_trait]
@@ -312,6 +319,8 @@ impl Worker {
             self.config.client_identity_override.clone(),
             new_client,
         ));
+        // TODO: client for SharedNamespaceWorker needs to be replaced
+        self.worker_heartbeat_mgr.map(|mgr| mgr.replace_client(self.client.clone()));
         *worker_key =
             slot_provider.and_then(|slot_provider| self.client.workers().register(slot_provider));
     }

@@ -188,6 +188,7 @@ pub fn init_integ_telem() -> Option<&'static CoreRuntime> {
         let telemetry_options = get_integ_telem_options();
         let runtime_options = RuntimeOptionsBuilder::default()
             .telemetry_options(telemetry_options)
+            .heartbeat_interval(Some(Duration::from_millis(100)))
             .build()
             .expect("Runtime options build cleanly");
         let rt =

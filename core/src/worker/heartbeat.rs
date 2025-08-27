@@ -69,6 +69,7 @@ impl SharedNamespaceWorker {
                 }
                 tokio::select! {
                     _ = ticker.tick() => {
+                        println!("client: {:?}", client_clone.get_identity());
                         let mut hb_to_send = Vec::new();
                         for (instance_key, heartbeat_callback) in heartbeat_map_clone.lock().iter() {
                             let mut heartbeat = heartbeat_callback();
@@ -95,17 +96,17 @@ impl SharedNamespaceWorker {
                             last_heartbeat_time_map.insert(instance_key.clone(), now);
                         }
                         println!("Sending heartbeat: {:?}", hb_to_send);
-                        if let Err(e) = client_clone.record_worker_heartbeat(client_identity.namespace.clone(), client_identity.endpoint.clone(), hb_to_send
-                            ).await {
-                                println!("ERROR sending heartbeat: {:?}", e);
-                                if matches!(
-                                e.code(),
-                                tonic::Code::Unimplemented
-                                ) {
-                                    return;
-                                }
-                                warn!(error=?e, "Network error while sending worker heartbeat");
-                            }
+                        // if let Err(e) = client_clone.record_worker_heartbeat(client_identity.namespace.clone(), client_identity.endpoint.clone(), hb_to_send
+                        //     ).await {
+                        //         println!("ERROR sending heartbeat: {:?}", e);
+                        //         if matches!(
+                        //         e.code(),
+                        //         tonic::Code::Unimplemented
+                        //         ) {
+                        //             return;
+                        //         }
+                        //         warn!(error=?e, "Network error while sending worker heartbeat");
+                        //     }
                     }
                     _ = reset_notify.notified() => {
                         ticker.reset();
