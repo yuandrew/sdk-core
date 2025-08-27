@@ -1385,9 +1385,7 @@ async fn runtime_new_otel() {
     let wf_name = "runtime_new_otel";
     let mut starter = CoreWfStarter::new_with_runtime(wf_name, rt);
     starter.worker_config.max_cached_workflows(5_usize);
-    // let worker = starter.get_worker().await;
     let mut worker = starter.worker().await;
-    // let run_id = starter.start_wf().await;
 
     // Run a workflow
     worker.register_wf(wf_name.to_string(), |ctx: WfContext| async move {
@@ -1406,17 +1404,19 @@ async fn runtime_new_otel() {
         return Ok(i);
     });
 
+    println!("[run] 1st");
     starter.start_with_worker(wf_name, &mut worker).await;
 
-    // worker
-    //     .submit_wf(
-    //         wf_name.to_owned(),
-    //         wf_name.to_owned(),
+    // for i in 0..5 {
+    //     worker.submit_wf(
+    //         format!("{wf_name}-{i}"),
+    //         wf_name,
     //         vec![],
-    //         WorkflowOptions::default(),
+    //         starter.workflow_options.clone(),
     //     )
-    //     .await
-    //     .unwrap();
+    //         .await
+    //         .unwrap();
+    // }
     worker.run_until_done().await.unwrap();
 
     // TODO: add some asserts to ensure data shows up

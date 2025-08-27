@@ -1,5 +1,4 @@
 use crate::dbg_panic;
-use std::backtrace::Backtrace;
 use std::{
     any::Any,
     borrow::Cow,
@@ -350,11 +349,7 @@ impl CounterBase for Counter {
         });
         bound.adds(value);
 
-        // let bt = Backtrace::force_capture();
-
-        // println!("BT{:?}", bt);
         if let Some(ref in_mem) = self.in_memory {
-            println!("pre-bound, adding to in-memory counter");
             let bound = in_mem.bound_cache.get_or_init(|| {
                 in_mem
                     .metric

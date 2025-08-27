@@ -120,6 +120,8 @@ impl MetricsContext {
 
     /// A workflow task queue poll succeeded
     pub(crate) fn wf_tq_poll_ok(&self) {
+        // TODO: add mechanism for taking timestamp
+        println!("wf_tq_poll_ok");
         self.instruments.wf_task_queue_poll_succeed_counter.adds(1);
     }
 
@@ -341,12 +343,12 @@ impl Instruments {
                 description: "Count of workflow task queue poll timeouts (no new task)".into(),
                 unit: "".into(),
             }),
-            wf_task_queue_poll_succeed_counter: meter.counter(MetricParameters {
+            wf_task_queue_poll_succeed_counter: create_counter(MetricParameters {
                 name: "workflow_task_queue_poll_succeed".into(),
                 description: "Count of workflow task queue poll successes".into(),
                 unit: "".into(),
             }),
-            wf_task_execution_failure_counter: meter.counter(MetricParameters {
+            wf_task_execution_failure_counter: create_counter(MetricParameters {
                 name: "workflow_task_execution_failed".into(),
                 description: "Count of workflow task execution failures".into(),
                 unit: "".into(),

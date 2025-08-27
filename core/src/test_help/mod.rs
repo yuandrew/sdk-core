@@ -180,7 +180,7 @@ pub(crate) fn mock_worker(mocks: MocksHolder) -> Worker {
                 .unwrap_or_else(|| mock_poller_from_resps([])),
         },
         None,
-        false,
+        None,
     )
 }
 

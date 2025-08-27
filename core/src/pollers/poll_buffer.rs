@@ -603,11 +603,13 @@ impl
         )>,
     > {
         if let Some(sq) = self.sticky_poller.as_ref() {
+            println!("sticky poll");
             tokio::select! {
                 r = self.normal_poller.poll() => r,
                 r = sq.poll() => r,
             }
         } else {
+            println!("regular poll");
             self.normal_poller.poll().await
         }
     }

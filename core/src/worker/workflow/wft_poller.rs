@@ -210,7 +210,7 @@ fn new_wft_poller(
                             continue;
                         }
                     };
-                    metrics.wf_tq_poll_ok();
+                    metrics.wf_tq_poll_ok(); // TODO: timestamp here, do we have access to sticky here?
                     Some((Ok((work, permit)), (poller, metrics)))
                 }
                 Some(Err(e)) => {
