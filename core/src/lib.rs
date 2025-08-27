@@ -127,7 +127,7 @@ where
     ));
 
     let mut worker = Worker::new(
-        worker_config,
+        worker_config.clone(),
         sticky_q,
         client_bag.clone(),
         Some(&runtime.telemetry),
@@ -150,6 +150,7 @@ where
                         namespace,
                         runtime.task_queue_key()
                     ),
+                    client_identity_override: worker_config.client_identity_override.clone(),
                 },
                 callback,
                 client_bag,
@@ -419,9 +420,6 @@ impl CoreRuntime {
                         namespace_map.lock().remove(&client_identity_clone);
                     });
 
-                    // The first client of a ClientIdentity is the client used for the
-                    // SharedNamespaceWorker, so we need that client's heartbeat_map to store
-                    // heartbeat callbacks
                     let heartbeat_map = client.get_heartbeat_map();
 
                     SharedNamespaceWorker::new(

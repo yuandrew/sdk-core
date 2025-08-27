@@ -13,11 +13,15 @@ use tokio::sync::Notify;
 /// Callback used to collect heartbeat data from each worker at the time of heartbeat
 pub(crate) type HeartbeatFn = Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
 
+/// Identifies a client on the same namespace. This allows us to worker heartbeat per-runtime,
+/// per-namespace, and per-client. It is expected that each unique client uses a unique
+/// client_identity_override to differentiate its identity.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ClientIdentity {
     pub(crate) endpoint: String,
     pub(crate) namespace: String,
     pub(crate) task_queue: String,
+    pub(crate) client_identity_override: Option<String>,
 }
 
 /// SharedNamespaceWorker is responsible for polling nexus-delivered worker commands and sending
@@ -211,6 +215,7 @@ mod tests {
                     "temporal-sys/worker-commands/{}/{}",
                     namespace, task_queue_key,
                 ),
+                client_identity_override: Some("test-identity".to_string()),
             },
             Duration::from_millis(100),
             None,
