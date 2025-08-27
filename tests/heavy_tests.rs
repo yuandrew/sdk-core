@@ -12,7 +12,9 @@ use std::{
 };
 use temporal_client::{GetWorkflowResultOpts, WfClientExt, WorkflowClientTrait, WorkflowOptions};
 use temporal_sdk::{ActContext, ActivityOptions, WfContext, WorkflowResult};
-use temporal_sdk_core::{CoreRuntime, ResourceBasedTuner, ResourceSlotOptions};
+use temporal_sdk_core::{
+    CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, RuntimeOptionsBuilder,
+};
 use temporal_sdk_core_api::worker::PollerBehavior;
 use temporal_sdk_core_protos::{
     coresdk::{AsJsonPayloadExt, workflow_commands::ActivityCancellationType},
@@ -180,92 +182,96 @@ async fn chunky_activities_resource_based() {
     dbg!(running.elapsed());
 }
 
-// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-// async fn workflow_load() {
-//     const SIGNAME: &str = "signame";
-//     let num_workflows = 500;
-//     let wf_name = "workflow_load";
-//     let (mut telemopts, _, _aborter) = prom_metrics(None);
-//     // Avoid initting two logging systems, since when this test is run with others it can
-//     // cause us to encounter the tracing span drop bug
-//     telemopts.logging = None;
-//     init_integ_telem();
-//     let rt = CoreRuntime::new_assume_tokio(telemopts).unwrap();
-//     let mut starter = CoreWfStarter::new_with_runtime("workflow_load", rt);
-//     starter
-//         .worker_config
-//         .max_outstanding_workflow_tasks(5_usize)
-//         .max_cached_workflows(200_usize)
-//         .activity_task_poller_behavior(PollerBehavior::SimpleMaximum(10_usize))
-//         .max_outstanding_activities(100_usize);
-//     let mut worker = starter.worker().await;
-//     worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
-//         let sigchan = ctx.make_signal_channel(SIGNAME).map(Ok);
-//         let drained_fut = sigchan.forward(sink::drain());
-//
-//         let real_stuff = async move {
-//             for _ in 0..5 {
-//                 ctx.activity(ActivityOptions {
-//                     activity_type: "echo_activity".to_string(),
-//                     start_to_close_timeout: Some(Duration::from_secs(5)),
-//                     input: "hi!".as_json_payload().expect("serializes fine"),
-//                     ..Default::default()
-//                 })
-//                 .await;
-//                 ctx.timer(Duration::from_secs(1)).await;
-//             }
-//         };
-//         tokio::select! {
-//             _ = drained_fut => {}
-//             _ = real_stuff => {}
-//         }
-//
-//         Ok(().into())
-//     });
-//     worker.register_activity(
-//         "echo_activity",
-//         |_ctx: ActContext, echo_me: String| async move { Ok(echo_me) },
-//     );
-//     let client = starter.get_client().await;
-//
-//     let mut workflow_handles = vec![];
-//     for i in 0..num_workflows {
-//         let wfid = format!("{wf_name}_{i}");
-//         let rid = worker
-//             .submit_wf(
-//                 wfid.clone(),
-//                 wf_name.to_owned(),
-//                 vec![],
-//                 WorkflowOptions::default(),
-//             )
-//             .await
-//             .unwrap();
-//         workflow_handles.push(client.get_untyped_workflow_handle(wfid, rid));
-//     }
-//
-//     let sig_sender = async {
-//         loop {
-//             let sends: FuturesUnordered<_> = (0..num_workflows)
-//                 .map(|i| {
-//                     client.signal_workflow_execution(
-//                         format!("{wf_name}_{i}"),
-//                         "".to_string(),
-//                         SIGNAME.to_string(),
-//                         None,
-//                         None,
-//                     )
-//                 })
-//                 .collect();
-//             sends
-//                 .map(|_| Ok(()))
-//                 .forward(sink::drain())
-//                 .await
-//                 .expect("Sending signals works");
-//             tokio::time::sleep(Duration::from_secs(2)).await;
-//         }
-//     };
-//     tokio::select! { r1 = worker.run_until_done() => {r1.unwrap()}, _ = sig_sender => {}}
-// }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workflow_load() {
+    const SIGNAME: &str = "signame";
+    let num_workflows = 500;
+    let wf_name = "workflow_load";
+    let (mut telemopts, _, _aborter) = prom_metrics(None);
+    // Avoid initting two logging systems, since when this test is run with others it can
+    // cause us to encounter the tracing span drop bug
+    telemopts.logging = None;
+    init_integ_telem();
+    let runtimeopts = RuntimeOptionsBuilder::default()
+        .telemetry_options(telemopts)
+        .build()
+        .unwrap();
+    let rt = CoreRuntime::new_assume_tokio(runtimeopts).unwrap();
+    let mut starter = CoreWfStarter::new_with_runtime("workflow_load", rt);
+    starter
+        .worker_config
+        .max_outstanding_workflow_tasks(5_usize)
+        .max_cached_workflows(200_usize)
+        .activity_task_poller_behavior(PollerBehavior::SimpleMaximum(10_usize))
+        .max_outstanding_activities(100_usize);
+    let mut worker = starter.worker().await;
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        let sigchan = ctx.make_signal_channel(SIGNAME).map(Ok);
+        let drained_fut = sigchan.forward(sink::drain());
+
+        let real_stuff = async move {
+            for _ in 0..5 {
+                ctx.activity(ActivityOptions {
+                    activity_type: "echo_activity".to_string(),
+                    start_to_close_timeout: Some(Duration::from_secs(5)),
+                    input: "hi!".as_json_payload().expect("serializes fine"),
+                    ..Default::default()
+                })
+                .await;
+                ctx.timer(Duration::from_secs(1)).await;
+            }
+        };
+        tokio::select! {
+            _ = drained_fut => {}
+            _ = real_stuff => {}
+        }
+
+        Ok(().into())
+    });
+    worker.register_activity(
+        "echo_activity",
+        |_ctx: ActContext, echo_me: String| async move { Ok(echo_me) },
+    );
+    let client = starter.get_client().await;
+
+    let mut workflow_handles = vec![];
+    for i in 0..num_workflows {
+        let wfid = format!("{wf_name}_{i}");
+        let rid = worker
+            .submit_wf(
+                wfid.clone(),
+                wf_name.to_owned(),
+                vec![],
+                WorkflowOptions::default(),
+            )
+            .await
+            .unwrap();
+        workflow_handles.push(client.get_untyped_workflow_handle(wfid, rid));
+    }
+
+    let sig_sender = async {
+        loop {
+            let sends: FuturesUnordered<_> = (0..num_workflows)
+                .map(|i| {
+                    client.signal_workflow_execution(
+                        format!("{wf_name}_{i}"),
+                        "".to_string(),
+                        SIGNAME.to_string(),
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            sends
+                .map(|_| Ok(()))
+                .forward(sink::drain())
+                .await
+                .expect("Sending signals works");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    };
+    tokio::select! { r1 = worker.run_until_done() => {r1.unwrap()}, _ = sig_sender => {}}
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn evict_while_la_running_no_interference() {

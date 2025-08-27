@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 use temporal_sdk_core::CoreRuntime;
 use temporal_sdk_core::RuntimeOptions as CoreRuntimeOptions;
+use temporal_sdk_core::RuntimeOptionsBuilder as CoreRuntimeOptionsBuilder;
 use temporal_sdk_core::TokioRuntimeBuilder;
 use temporal_sdk_core::telemetry::{build_otlp_metric_exporter, start_prometheus_metric_exporter};
 use temporal_sdk_core_api::telemetry::HistogramBucketOverrides;
@@ -249,7 +250,10 @@ impl Runtime {
             ))
         };
 
-        let core_runtime_options = CoreRuntimeOptions::new(telemetry_options, heartbeat_interval);
+        let core_runtime_options = CoreRuntimeOptionsBuilder::default()
+            .telemetry_options(telemetry_options)
+            .heartbeat_interval(heartbeat_interval)
+            .build()?;
 
         // Build core runtime
         let mut core = CoreRuntime::new(core_runtime_options, TokioRuntimeBuilder::default())?;
