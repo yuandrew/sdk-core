@@ -95,7 +95,8 @@ impl SharedNamespaceWorker {
 
                             last_heartbeat_time_map.insert(instance_key.clone(), now);
                         }
-                        println!("Sending worker heartbeat\n\t{:?}\n\t{:?}", hb_to_send[0].total_sticky_cache_hit, hb_to_send[0].total_sticky_cache_miss);
+                        println!("Sending worker heartbeat\n\ttotal_sticky_cache_hit {:?}\n\ttotal_sticky_cache_miss {:?}", hb_to_send[0].total_sticky_cache_hit, hb_to_send[0].total_sticky_cache_miss);
+                        println!("\tworkflow_poller_info {:?}", hb_to_send[0].workflow_poller_info);
                         if let Err(e) = client_clone.record_worker_heartbeat(client_identity.namespace.clone(), client_identity.endpoint.clone(), hb_to_send
                             ).await {
                             println!("Error sending worker heartbeat: {:?}", e);

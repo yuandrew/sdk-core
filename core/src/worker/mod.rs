@@ -52,7 +52,7 @@ use crate::{
 use activities::WorkerActivityTasks;
 use futures_util::{StreamExt, stream};
 use gethostname::gethostname;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use slot_provider::SlotProvider;
 use std::{
     convert::TryInto,
@@ -383,6 +383,16 @@ impl Worker {
         );
         let act_permits = act_slots.get_extant_count_rcv();
         let (external_wft_tx, external_wft_rx) = unbounded_channel();
+        // TODO: I don't think RwLock has any benefit over Mutex
+        let wf_last_suc_poll_time = Arc::new(Mutex::new(None));
+        let wf_sticky_last_suc_poll_time = Arc::new(Mutex::new(None));
+        let act_last_suc_poll_time = Arc::new(Mutex::new(None));
+        let nexus_last_suc_poll_time = Arc::new(Mutex::new(None));
+
+        // let (wf_last_successful_poll_time_tx, wf_last_successful_poll_time_rx) = unbounded_channel();
+        // let (wf_sticky_last_successful_poll_time_tx, wf_sticky_last_successful_poll_time_rx) = unbounded_channel();
+        // let (act_last_successful_poll_time_tx, act_last_successful_poll_time_rx) = unbounded_channel();
+        // let (nexus_last_successful_poll_time_tx, nexus_last_successful_poll_time_rx) = unbounded_channel();
         let nexus_slots = MeteredPermitDealer::new(
             tuner.nexus_task_slot_supplier(),
             metrics.with_new_attrs([nexus_worker_type()]),
@@ -399,6 +409,8 @@ impl Worker {
                     &metrics,
                     &shutdown_token,
                     &wft_slots,
+                    wf_last_suc_poll_time.clone(),
+                    wf_sticky_last_suc_poll_time.clone(),
                 );
                 let wft_stream = if !client.is_mock() {
                     // Some replay tests combine a mock client with real pollers,
@@ -425,6 +437,7 @@ impl Worker {
                             max_worker_acts_per_second: config.max_task_queue_activities_per_second,
                             max_tps: config.max_task_queue_activities_per_second,
                         },
+                        act_last_suc_poll_time.clone(),
                     );
                     Some(Box::from(ap) as BoxedActPoller)
                 };
@@ -438,6 +451,7 @@ impl Worker {
                     nexus_slots.clone(),
                     shutdown_token.child_token(),
                     Some(move |np| np_metrics.record_num_pollers(np)),
+                    nexus_last_suc_poll_time.clone(),
                     shared_namespace_worker,
                 )) as BoxedNexusPoller;
 
@@ -629,28 +643,27 @@ impl Worker {
                     }
                 }
 
-                // TODO: poller info
                 let workflow_poller_info = Some(WorkerPollerInfo {
                     current_pollers: wft_current_pollers as i32,
-                    last_successful_poll_time: None, // TODO no idea how to get this
+                    last_successful_poll_time: (*wf_last_suc_poll_time.lock()).map(Into::into),
                     is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
                 });
 
                 let workflow_sticky_poller_info = Some(WorkerPollerInfo {
                     current_pollers: sticky_wft_current_pollers as i32,
-                    last_successful_poll_time: None,// TODO no idea how to get this
+                    last_successful_poll_time: (*wf_sticky_last_suc_poll_time.lock()).map(Into::into),
                     is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
                 });
 
                 let activity_poller_info = Some(WorkerPollerInfo {
                     current_pollers: activity_current_pollers as i32,
-                    last_successful_poll_time: None,// TODO no idea how to get this
+                    last_successful_poll_time: (*act_last_suc_poll_time.lock()).map(Into::into),
                     is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
                 });
 
                 let nexus_poller_info = Some(WorkerPollerInfo {
                     current_pollers: nexus_current_pollers as i32,
-                    last_successful_poll_time: None,// TODO no idea how to get this
+                    last_successful_poll_time: (*nexus_last_suc_poll_time.lock()).map(Into::into),
                     is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
                 });
 
@@ -663,6 +676,7 @@ impl Worker {
                     total_processed_tasks: (workflow_task_queue_poll_succeed + workflow_task_execution_failed) as i32,
                     total_failed_tasks: workflow_task_execution_failed as i32,
 
+                    // TODO
                     // These values are set at heartbeat time by SharedNamespaceWorker
                     last_interval_processed_tasks: 0,
                     last_interval_failure_tasks: 0,
@@ -686,10 +700,10 @@ impl Worker {
                     activity_task_slots_info: None, // TODO
                     nexus_task_slots_info: None, // TODO
                     local_activity_slots_info: None, // TODO
-                    workflow_poller_info, // TODO
+                    workflow_poller_info,
                     workflow_sticky_poller_info, // TODO: should this be none if no cache not used?
-                    activity_poller_info, // TODO
-                    nexus_poller_info, // TODO
+                    activity_poller_info,
+                    nexus_poller_info,
                     total_sticky_cache_hit: total_sticky_cache_hit as i32,
                     total_sticky_cache_miss: total_sticky_cache_miss as i32,
                     current_sticky_cache_size: sticky_cache_size as i32,
