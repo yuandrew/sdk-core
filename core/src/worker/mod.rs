@@ -319,8 +319,8 @@ impl Worker {
             self.config.client_identity_override.clone(),
             new_client,
         ));
-        // TODO: client for SharedNamespaceWorker needs to be replaced
-        self.worker_heartbeat_mgr.map(|mgr| mgr.replace_client(self.client.clone()));
+        // // TODO: client for SharedNamespaceWorker needs to be replaced
+        // self.worker_heartbeat_mgr.map(|mgr| mgr.replace_client(self.client.clone()));
         *worker_key =
             slot_provider.and_then(|slot_provider| self.client.workers().register(slot_provider));
     }

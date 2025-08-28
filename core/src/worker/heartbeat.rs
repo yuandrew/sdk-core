@@ -1,7 +1,7 @@
 use crate::WorkerClient;
 use crate::abstractions::dbg_panic;
 use crate::telemetry::TelemetryInstance;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use prost_types::Duration as PbDuration;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ pub(crate) struct SharedNamespaceWorker {
 
 impl SharedNamespaceWorker {
     pub(crate) fn new(
-        client: Arc<dyn WorkerClient>,
+        client: RwLock<Arc<dyn WorkerClient>>,
         client_identity: ClientIdentity,
         heartbeat_interval: Duration,
         telemetry: Option<&TelemetryInstance>,
@@ -50,13 +50,14 @@ impl SharedNamespaceWorker {
             })
             .build()
             .expect("all required fields should be implemented");
-        let worker = crate::worker::Worker::new(config, None, client.clone(), telemetry, true);
+        let worker = crate::worker::Worker::new(config, None, client.read().clone(), telemetry, true);
 
         let last_heartbeat_time_map = Mutex::new(HashMap::new());
 
         // heartbeat task
         let reset_notify = Arc::new(Notify::new());
-        let client_clone = client.clone();
+        // let client_clone = client.clone();
+        let client_clone = client;
 
         let heartbeat_map_clone = heartbeat_map.clone();
 
@@ -73,7 +74,8 @@ impl SharedNamespaceWorker {
                 }
                 tokio::select! {
                     _ = ticker.tick() => {
-                        println!("client: {:?}", client_clone.get_identity());
+                        println!("client: {:?}", client_clone.read().get_identity());
+                        // TODO: How to update worker's client?
                         let mut hb_to_send = Vec::new();
                         for (instance_key, heartbeat_callback) in heartbeat_map_clone.lock().iter() {
                             let mut heartbeat = heartbeat_callback();

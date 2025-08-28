@@ -9,7 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use temporal_client::{ClientOptionsBuilder, WorkflowOptions};
+use temporal_client::{ClientOptionsBuilder, NamespacedClient, WorkflowOptions};
 use temporal_sdk::{
     ActContext, ActivityError, ActivityOptions, WfContext, interceptors::WorkerInterceptor,
 };
@@ -297,9 +297,9 @@ async fn worker_heartbeat_replace_client() {
         .unwrap();
 
     println!("sleeping for 200ms");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    println!("replacing client");
+    println!("\nreplacing client {:?}", client2.get_identity());
     worker.replace_client(client2.get_client().inner().clone());
 
     println!("sleeping for 200ms");
