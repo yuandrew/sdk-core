@@ -31,11 +31,6 @@ impl SharedNamespaceWorker {
         heartbeat_interval: Duration,
         telemetry: Option<WorkerTelemetry>,
     ) -> Self {
-        println!(
-            "SharedNamespaceWorker::new() {:?}\n\tsdk_name_and_version key{:?}",
-            client.get_identity(),
-            client.sdk_name_and_version()
-        );
         let config = WorkerConfigBuilder::default()
             .namespace(namespace.clone())
             .task_queue(format!(
@@ -176,7 +171,6 @@ impl fmt::Debug for SharedNamespaceWorker {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{
         test_help::{WorkerExt, test_worker_cfg},
         worker,
