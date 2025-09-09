@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use temporal_client::WorkflowOptions;
-use temporal_sdk::{ActivityOptions, WfContext, interceptors::WorkerInterceptor};
+use temporal_sdk::{ActivityOptions, WfContext, interceptors::WorkerInterceptor, ActContext};
 use temporal_sdk_core::{
     CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, RuntimeOptionsBuilder, init_worker,
     test_help::{
@@ -57,6 +57,7 @@ use temporal_sdk_core_protos::{
 use tokio::sync::{Barrier, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 
 #[tokio::test]
 async fn worker_validation_fails_on_nonexistent_namespace() {
@@ -574,4 +575,42 @@ async fn sets_build_id_from_wft_complete() {
         .await
         .unwrap();
     worker.run_until_done().await.unwrap();
+}
+
+#[tokio::test]
+async fn worker_heartbeat() {
+    let wf_name = "worker_heartbeat";
+    let runtimeopts = RuntimeOptionsBuilder::default()
+        .telemetry_options(get_integ_telem_options())
+        .heartbeat_interval(Some(Duration::from_millis(100)))
+        .build()
+        .unwrap();
+    let runtime =
+        CoreRuntime::new_assume_tokio(runtimeopts)
+            .unwrap();
+
+    let mut starter = CoreWfStarter::new_with_runtime(wf_name, runtime);
+    let mut worker = starter.worker().await;
+
+    worker.register_activity("sleeper", |_ctx: ActContext, str: String| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(str)
+    });
+    worker.register_wf(wf_name.to_owned(), |ctx: WfContext| async move {
+        ctx.activity(ActivityOptions {
+            activity_type: "sleeper".to_string(),
+            input: "sleep".as_json_payload().expect("serializes fine"),
+            schedule_to_close_timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        })
+            .await;
+        Ok(().into())
+    });
+    starter.start_with_worker(wf_name, &mut worker).await;
+    worker.run_until_done().await.unwrap();
+
+    // for a in starter.get_history().await.events {
+    //     println!("[e] {:?}", a);
+    // }
+    panic!("panicing to show prints");
 }
