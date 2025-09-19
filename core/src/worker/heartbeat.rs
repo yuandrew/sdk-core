@@ -9,9 +9,10 @@ use std::time::{Duration, SystemTime};
 use temporal_sdk_core_api::worker::{WorkerConfigBuilder, WorkerVersioningStrategy};
 use temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat;
 use tokio::sync::Notify;
+use uuid::Uuid;
 
 /// Callback used to collect heartbeat data from each worker at the time of heartbeat
-pub(crate) type HeartbeatFn = Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
+pub(crate) type HeartbeatFn = Box<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ClientIdentity {
@@ -24,7 +25,7 @@ pub(crate) struct ClientIdentity {
 /// worker heartbeats to the server. This communicates with all workers in the same process that
 /// share the same namespace.
 pub(crate) struct SharedNamespaceWorker {
-    heartbeat_map: Arc<Mutex<HashMap<String, HeartbeatFn>>>,
+    heartbeat_map: Arc<Mutex<HashMap<Uuid, HeartbeatFn>>>,
 }
 
 impl SharedNamespaceWorker {
@@ -34,7 +35,7 @@ impl SharedNamespaceWorker {
         heartbeat_interval: Duration,
         telemetry: Option<&TelemetryInstance>,
         shutdown_callback: Arc<dyn Fn() + Send + Sync>,
-        heartbeat_map: Arc<Mutex<HashMap<String, HeartbeatFn>>>,
+        heartbeat_map: Arc<Mutex<HashMap<Uuid, HeartbeatFn>>>,
     ) -> Self {
         let config = WorkerConfigBuilder::default()
             .namespace(client_identity.namespace.clone())
@@ -48,8 +49,6 @@ impl SharedNamespaceWorker {
             .expect("all required fields should be implemented");
         let worker = crate::worker::Worker::new(config, None, client.clone(), telemetry, None);
 
-        let last_heartbeat_time_map = Mutex::new(HashMap::new());
-
         // heartbeat task
         let reset_notify = Arc::new(Notify::new());
         let client_clone = client.clone();
@@ -58,42 +57,39 @@ impl SharedNamespaceWorker {
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(heartbeat_interval);
+            let mut last_heartbeat_time = HashMap::new();
+            // TODO: maybe combine these 2, fix name
+            let mut last_processed_tasks = HashMap::new();
             ticker.tick().await;
             loop {
-                // TODO: Race condition here, can technically shut down before anything is ever initialized
-                if heartbeat_map_clone.lock().is_empty() {
-                    worker.shutdown().await;
-                    // remove this worker from the Runtime map
-                    shutdown_callback();
-                    return;
-                }
                 tokio::select! {
                     _ = ticker.tick() => {
                         println!("tick");
                         let mut hb_to_send = Vec::new();
-                        for (instance_key, heartbeat_callback) in heartbeat_map_clone.lock().iter() {
+                        let heartbeat_map_lock = heartbeat_map_clone.lock();
+                        for (instance_key, heartbeat_callback) in heartbeat_map_lock.iter() {
                             let mut heartbeat = heartbeat_callback();
-                            let mut last_heartbeat_time_map = last_heartbeat_time_map.lock();
-                            let heartbeat_time = last_heartbeat_time_map.get(instance_key).cloned();
+                            let heartbeat_time = last_heartbeat_time.get(instance_key).cloned();
 
                             let now = SystemTime::now();
-                            let elapsed_since_last_heartbeat = if let Some(heartbeat_time) = heartbeat_time {
-                                let dur = now.duration_since(heartbeat_time).unwrap_or(Duration::ZERO);
-                                Some(PbDuration {
+                            let elapsed_since_last_heartbeat = heartbeat_time.map(
+                                |hb_time|
+                                {let dur = now.duration_since(hb_time).unwrap_or(Duration::ZERO);
+                                    PbDuration {
                                     seconds: dur.as_secs() as i64,
                                     nanos: dur.subsec_nanos() as i32,
-                                })
-                            } else {
-                                None
-                            };
+                                }
+                                }
+                            );
 
+                            process_slot_info(*instance_key, &mut heartbeat, &mut last_processed_tasks);
 
                             heartbeat.elapsed_since_last_heartbeat = elapsed_since_last_heartbeat;
                             heartbeat.heartbeat_time = Some(now.into());
 
                             hb_to_send.push(heartbeat);
 
-                            last_heartbeat_time_map.insert(instance_key.clone(), now);
+                            last_heartbeat_time.insert(*instance_key, now);
                         }
                         println!("Sending worker heartbeat\n\ttotal_sticky_cache_hit {:?}\n\ttotal_sticky_cache_miss {:?}", hb_to_send[0].total_sticky_cache_hit, hb_to_send[0].total_sticky_cache_miss);
                         println!("\tworkflow_poller_info {:?}", hb_to_send[0].workflow_poller_info);
@@ -124,12 +120,12 @@ impl SharedNamespaceWorker {
     /// mechanism on worker shutdown
     pub(crate) fn register_callback(
         &mut self,
-        worker_instance_key: String,
+        worker_instance_key: Uuid,
         heartbeat_callback: HeartbeatFn,
     ) -> Arc<dyn Fn() + Send + Sync> {
         self.heartbeat_map
             .lock()
-            .insert(worker_instance_key.clone(), heartbeat_callback);
+            .insert(worker_instance_key, heartbeat_callback);
 
         let heartbeat_map_clone = self.heartbeat_map.clone();
         Arc::new(move || {
@@ -144,6 +140,55 @@ impl SharedNamespaceWorker {
                 );
             }
         })
+    }
+}
+
+#[derive(Default)]
+struct SlotsInfo {
+    last_interval_processed_tasks: i32,
+    last_interval_failure_tasks: i32,
+}
+
+#[derive(Default)]
+struct HeartbeatSlotsInfo {
+    workflow_task_slots_info: SlotsInfo,
+    activity_task_slots_info: SlotsInfo,
+    nexus_task_slots_info: SlotsInfo,
+    local_activity_slots_info: SlotsInfo,
+}
+
+fn process_slot_info(worker_instance_key: Uuid, heartbeat: &mut WorkerHeartbeat, slots_map: &mut HashMap<Uuid, HeartbeatSlotsInfo>) {
+    let slots_info = slots_map.entry(worker_instance_key).or_insert_with(|| HeartbeatSlotsInfo::default());
+    if let Some(wft_slot_info) = heartbeat.workflow_task_slots_info.as_mut() {
+        wft_slot_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks - slots_info.workflow_task_slots_info.last_interval_processed_tasks;
+        wft_slot_info.last_interval_failure_tasks = wft_slot_info.total_failed_tasks - slots_info.workflow_task_slots_info.last_interval_failure_tasks;
+
+        slots_info.workflow_task_slots_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks;
+        slots_info.workflow_task_slots_info.last_interval_failure_tasks = wft_slot_info.total_failed_tasks;
+    }
+
+    if let Some(act_slot_info) = heartbeat.activity_task_slots_info.as_mut() {
+        act_slot_info.last_interval_processed_tasks = act_slot_info.total_processed_tasks - slots_info.activity_task_slots_info.last_interval_processed_tasks;
+        act_slot_info.last_interval_failure_tasks = act_slot_info.total_failed_tasks - slots_info.activity_task_slots_info.last_interval_failure_tasks;
+
+        slots_info.activity_task_slots_info.last_interval_processed_tasks = act_slot_info.total_processed_tasks;
+        slots_info.activity_task_slots_info.last_interval_failure_tasks = act_slot_info.total_failed_tasks;
+    }
+
+    if let Some(nexus_slot_info) = heartbeat.nexus_task_slots_info.as_mut() {
+        nexus_slot_info.last_interval_processed_tasks = nexus_slot_info.total_processed_tasks - slots_info.nexus_task_slots_info.last_interval_processed_tasks;
+        nexus_slot_info.last_interval_failure_tasks = nexus_slot_info.total_failed_tasks - slots_info.nexus_task_slots_info.last_interval_failure_tasks;
+
+        slots_info.nexus_task_slots_info.last_interval_processed_tasks = nexus_slot_info.total_processed_tasks;
+        slots_info.nexus_task_slots_info.last_interval_failure_tasks = nexus_slot_info.total_failed_tasks;
+    }
+
+    if let Some(la_slot_info) = heartbeat.local_activity_slots_info.as_mut() {
+        la_slot_info.last_interval_processed_tasks = la_slot_info.total_processed_tasks - slots_info.local_activity_slots_info.last_interval_processed_tasks;
+        la_slot_info.last_interval_failure_tasks = la_slot_info.total_failed_tasks - slots_info.local_activity_slots_info.last_interval_failure_tasks;
+
+        slots_info.local_activity_slots_info.last_interval_processed_tasks = la_slot_info.total_processed_tasks;
+        slots_info.local_activity_slots_info.last_interval_failure_tasks = la_slot_info.total_failed_tasks;
     }
 }
 

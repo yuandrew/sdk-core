@@ -7,9 +7,9 @@ use crate::{
     worker::{client::WorkerClient, wft_poller_behavior},
 };
 use futures_util::{Stream, stream};
+use parking_lot::Mutex;
 use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
-use parking_lot::Mutex;
 use temporal_sdk_core_api::worker::{WorkerConfig, WorkflowSlotKind};
 use temporal_sdk_core_protos::temporal::api::workflowservice::v1::PollWorkflowTaskQueueResponse;
 use tokio::sync::watch;

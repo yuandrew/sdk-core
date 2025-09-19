@@ -164,6 +164,10 @@ where
     pub(crate) fn max_permits(&self) -> Option<usize> {
         self.max_permits
     }
+
+    pub(crate) fn kind(&self) -> SlotKindType {
+        SK::kind()
+    }
 }
 
 impl MeteredPermitDealer<WorkflowSlotKind> {
@@ -396,6 +400,7 @@ macro_rules! dbg_panic {
   };
 }
 pub(crate) use dbg_panic;
+use temporal_sdk_core_api::worker::SlotKindType;
 
 pub(crate) struct ActiveCounter<F: Fn(usize)>(watch::Sender<usize>, Option<Arc<F>>);
 impl<F> ActiveCounter<F>

@@ -7,17 +7,11 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::time::Instant;
-use temporal_sdk_core_api::telemetry::metrics::{
-    BufferAttributes, BufferInstrumentRef, CoreMeter, Counter, CounterBase, Gauge, GaugeBase,
-    GaugeF64, GaugeF64Base, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase,
-    HistogramF64, HistogramF64Base, LazyBufferInstrument, MetricAttributable, MetricAttributes,
-    MetricCallBufferer, MetricEvent, MetricKeyValue, MetricKind, MetricParameters, MetricUpdateVal,
-    NewAttributes, NoOpCoreMeter,
-};
+use temporal_sdk_core_api::telemetry::metrics::{BufferAttributes, BufferInstrumentRef, CoreMeter, Counter, CounterBase, Gauge, GaugeBase, GaugeF64, GaugeF64Base, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase, HistogramF64, HistogramF64Base, LazyBufferInstrument, MetricAttributable, MetricAttributes, MetricCallBufferer, MetricEvent, MetricKeyValue, MetricKind, MetricParameters, MetricUpdateVal, NewAttributes, NoOpCoreMeter, TemporalMeter};
 use temporal_sdk_core_protos::temporal::api::{
     enums::v1::WorkflowTaskFailedCause, failure::v1::Failure,
 };
+use tokio::time::Instant;
 
 /// Used to track context associated with metrics, and record/update them
 #[derive(Clone)]
@@ -79,15 +73,24 @@ impl MetricsContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn top_level(namespace: String, tq: String, telemetry: &TelemetryInstance) -> Self {
-        if let Some(mut meter) = telemetry.get_temporal_metric_meter() {
+        MetricsContext::top_level_with_meter(namespace, tq, telemetry.get_temporal_metric_meter(), telemetry.in_memory_meter())
+    }
+
+    pub(crate) fn top_level_with_meter(
+        namespace: String,
+        tq: String,
+        temporal_meter: Option<TemporalMeter>,
+        in_memory_meter: Option<Arc<InMemoryMeter>>,
+    ) -> Self {
+        if let Some(mut meter) = temporal_meter {
             meter
                 .default_attribs
                 .attributes
                 .push(MetricKeyValue::new(KEY_NAMESPACE, namespace));
             meter.default_attribs.attributes.push(task_queue(tq));
             let kvs = meter.inner.new_attributes(meter.default_attribs);
-            let in_memory_meter = telemetry.in_memory_meter();
             let mut instruments = Instruments::new(
                 meter.inner.as_ref(),
                 in_memory_meter.as_deref().map(|m| m as &dyn CoreMeter),
@@ -375,12 +378,12 @@ impl Instruments {
                 description: "Count of activity task queue poll timeouts (no new task)".into(),
                 unit: "".into(),
             }),
-            act_task_received_counter: meter.counter(MetricParameters {
+            act_task_received_counter: create_counter(MetricParameters {
                 name: "activity_task_received".into(),
                 description: "Count of activity task queue poll successes".into(),
                 unit: "".into(),
             }),
-            act_execution_failed: meter.counter(MetricParameters {
+            act_execution_failed: create_counter(MetricParameters {
                 name: "activity_execution_failed".into(),
                 description: "Count of activity task execution failures".into(),
                 unit: "".into(),
@@ -448,7 +451,7 @@ impl Instruments {
                 unit: "duration".into(),
                 description: "Histogram of nexus task execution latencies".into(),
             }),
-            nexus_task_execution_failed: meter.counter(MetricParameters {
+            nexus_task_execution_failed: create_counter(MetricParameters {
                 name: "nexus_task_execution_failed".into(),
                 description: "Count of nexus task execution failures".into(),
                 unit: "".into(),
