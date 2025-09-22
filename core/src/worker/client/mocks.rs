@@ -1,10 +1,10 @@
 use super::*;
 use futures_util::Future;
 use std::sync::{Arc, LazyLock};
-use temporal_client::SlotManager;
+use temporal_client::ClientWorkerSet;
 
-pub(crate) static DEFAULT_WORKERS_REGISTRY: LazyLock<Arc<SlotManager>> =
-    LazyLock::new(|| Arc::new(SlotManager::new()));
+pub(crate) static DEFAULT_WORKERS_REGISTRY: LazyLock<Arc<ClientWorkerSet>> =
+    LazyLock::new(|| Arc::new(ClientWorkerSet::new()));
 
 pub(crate) static DEFAULT_TEST_CAPABILITIES: &Capabilities = &Capabilities {
     signal_and_query_header: true,
@@ -20,9 +20,9 @@ pub(crate) static DEFAULT_TEST_CAPABILITIES: &Capabilities = &Capabilities {
     nexus: false,
 };
 
-#[cfg(test)]
+#[cfg(any(feature = "test-utilities", test))]
 /// Create a mock client primed with basic necessary expectations
-pub(crate) fn mock_worker_client() -> MockWorkerClient {
+pub fn mock_worker_client() -> MockWorkerClient {
     let mut r = MockWorkerClient::new();
     r.expect_capabilities()
         .returning(|| Some(*DEFAULT_TEST_CAPABILITIES));
@@ -33,8 +33,9 @@ pub(crate) fn mock_worker_client() -> MockWorkerClient {
         .returning(|_| Ok(ShutdownWorkerResponse {}));
     r.expect_sdk_name_and_version()
         .returning(|| ("test-core".to_string(), "0.0.0".to_string()));
-    r.expect_get_identity()
+    r.expect_identity()
         .returning(|| "test-identity".to_string());
+    r.expect_worker_set_key().returning(Uuid::new_v4);
     r
 }
 
@@ -48,7 +49,7 @@ pub(crate) fn mock_manual_worker_client() -> MockManualWorkerClient {
     r.expect_is_mock().returning(|| true);
     r.expect_sdk_name_and_version()
         .returning(|| ("test-core".to_string(), "0.0.0".to_string()));
-    r.expect_get_identity()
+    r.expect_identity()
         .returning(|| "test-identity".to_string());
     r
 }
@@ -153,15 +154,15 @@ mockall::mock! {
         fn record_worker_heartbeat<'a, 'b>(
             &self,
             namespace: String,
-            identity: String,
             heartbeat: Vec<WorkerHeartbeat>
         ) -> impl Future<Output = Result<RecordWorkerHeartbeatResponse>> + Send + 'b where 'a: 'b, Self: 'b;
 
         fn replace_client(&self, new_client: RetryClient<Client>);
         fn capabilities(&self) -> Option<Capabilities>;
-        fn workers(&self) -> Arc<SlotManager>;
+        fn workers(&self) -> Arc<ClientWorkerSet>;
         fn is_mock(&self) -> bool;
         fn sdk_name_and_version(&self) -> (String, String);
-        fn get_identity(&self) -> String;
+        fn identity(&self) -> String;
+        fn worker_set_key(&self) -> Uuid;
     }
 }

@@ -1,4 +1,6 @@
-use crate::{abstractions::dbg_panic, telemetry::TelemetryInstance};
+#[cfg(test)]
+use crate::TelemetryInstance;
+use crate::abstractions::dbg_panic;
 
 use crate::telemetry::in_memory::InMemoryMeter;
 use std::{

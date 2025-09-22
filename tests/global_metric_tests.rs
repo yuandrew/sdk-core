@@ -1,3 +1,9 @@
+// All non-main.rs tests ignore dead common code so that the linter doesn't complain about about it.
+#[allow(dead_code)]
+mod common;
+
+use crate::common::get_integ_runtime_options;
+use common::CoreWfStarter;
 use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
 use temporal_sdk_core::{
@@ -7,7 +13,6 @@ use temporal_sdk_core::{
 use temporal_sdk_core_api::telemetry::{
     Logger, OtelCollectorOptionsBuilder, TelemetryOptionsBuilder, metrics::CoreMeter,
 };
-use temporal_sdk_core_test_utils::CoreWfStarter;
 use tracing::Level;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -75,12 +80,8 @@ async fn otel_errors_logged_as_errors() {
         })
         .build()
         .unwrap();
-    let runtimeopts = RuntimeOptionsBuilder::default()
-        .telemetry_options(telemopts)
-        .build()
-        .unwrap();
 
-    let rt = CoreRuntime::new_assume_tokio(runtimeopts).unwrap();
+    let rt = CoreRuntime::new_assume_tokio(get_integ_runtime_options(telemopts)).unwrap();
     let mut starter = CoreWfStarter::new_with_runtime("otel_errors_logged_as_errors", rt);
     let _worker = starter.get_worker().await;
 
@@ -101,18 +102,15 @@ async fn otel_errors_logged_as_errors() {
     );
     assert!(
         log_str.contains("@@@@@@@@@"),
-        "Expected fallback log not found in logs: {}",
-        log_str
+        "Expected fallback log not found in logs: {log_str}",
     );
     // TODO: OTel just doesn't actually log useful errors right now 🤷, see issues at top of test
     assert!(
         log_str.contains("ERROR"),
-        "Expected ERROR log not found in logs: {}",
-        log_str
+        "Expected ERROR log not found in logs: {log_str}",
     );
     assert!(
         log_str.contains("Metrics exporter otlp failed with the grpc server returns error"),
-        "Expected an OTel exporter error message in logs: {}",
-        log_str
+        "Expected an OTel exporter error message in logs: {log_str}",
     );
 }

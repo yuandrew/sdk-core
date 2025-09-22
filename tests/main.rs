@@ -3,7 +3,9 @@
 #[macro_use]
 extern crate rstest;
 #[macro_use]
-extern crate temporal_sdk_core_test_utils;
+extern crate assert_matches;
+
+mod common;
 
 #[cfg(test)]
 mod shared_tests;
@@ -15,6 +17,7 @@ mod integ_tests {
     mod ephemeral_server_tests;
     mod heartbeat_tests;
     mod metrics_tests;
+    mod pagination_tests;
     mod polling_tests;
     mod queries_tests;
     mod update_tests;
@@ -23,6 +26,10 @@ mod integ_tests {
     mod worker_versioning_tests;
     mod workflow_tests;
 
+    use crate::common::{
+        CoreWfStarter, get_integ_runtime_options, get_integ_server_options,
+        get_integ_telem_options, rand_6_chars,
+    };
     use std::time::Duration;
     use temporal_client::{NamespacedClient, WorkflowService};
     use temporal_sdk_core::{CoreRuntime, RuntimeOptionsBuilder, init_worker};
@@ -32,20 +39,15 @@ mod integ_tests {
         operatorservice::v1::CreateNexusEndpointRequest,
         workflowservice::v1::ListNamespacesRequest,
     };
-    use temporal_sdk_core_test_utils::{
-        CoreWfStarter, get_integ_server_options, get_integ_telem_options, rand_6_chars,
-    };
 
     // Create a worker like a bridge would (unwraps aside)
     #[tokio::test]
     #[ignore] // Really a compile time check more than anything
     async fn lang_bridge_example() {
         let opts = get_integ_server_options();
-        let runtimeopts = RuntimeOptionsBuilder::default()
-            .telemetry_options(get_integ_telem_options())
-            .build()
-            .unwrap();
-        let runtime = CoreRuntime::new_assume_tokio(runtimeopts).unwrap();
+        let runtime =
+            CoreRuntime::new_assume_tokio(get_integ_runtime_options(get_integ_telem_options()))
+                .unwrap();
         let mut retrying_client = opts
             .connect_no_namespace(runtime.telemetry().get_temporal_metric_meter())
             .await

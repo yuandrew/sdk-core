@@ -26,9 +26,9 @@ mod worker;
 
 #[cfg(test)]
 mod core_tests;
-#[cfg(test)]
+#[cfg(any(feature = "test-utilities", test))]
 #[macro_use]
-mod test_help;
+pub mod test_help;
 
 use std::collections::HashMap;
 pub(crate) use temporal_sdk_core_api::errors;
@@ -65,6 +65,8 @@ use crate::{
 };
 use anyhow::bail;
 use futures_util::Stream;
+use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,47 +125,20 @@ where
     let client_bag = Arc::new(WorkerClientBag::new(
         client,
         namespace.clone(),
+        client_ident.clone(),
+        namespace.clone(),
         client_ident,
         worker_config.versioning_strategy.clone(),
     ));
 
-    let mut worker = Worker::new(
-        worker_config,
+    Worker::new(
+        worker_config.clone(),
         sticky_q,
         client_bag.clone(),
         Some(&runtime.telemetry),
-        in_memory_meter,
-    );
-
-    if runtime.heartbeat_interval.is_some() {
-        let worker_instance_key = worker.worker_instance_key();
-        let heartbeat_callback = worker.get_heartbeat_callback();
-        if let Some(instance_key) = worker_instance_key
-            && let Some(callback) = heartbeat_callback
-        {
-            let remove_worker_callback = runtime.register_heartbeat_callback(
-                instance_key,
-                ClientIdentity {
-                    endpoint: endpoint.to_string(),
-                    namespace: namespace.clone(),
-                    task_queue: format!(
-                        "temporal-sys/worker-commands/{}/{}",
-                        namespace,
-                        runtime.task_queue_key()
-                    ),
-                },
-                callback,
-                client_bag,
-            );
-            worker.register_heartbeat_shutdown_callback(remove_worker_callback);
-        } else {
-            dbg_panic!(
-                "Worker instance key and heartbeat callback should exist for non-shared namespace worker"
-            );
-        }
-    }
-
-    Ok(worker)
+        runtime.heartbeat_interval,
+        false,
+    )
 }
 
 /// Create a worker for replaying one or more existing histories. It will auto-shutdown as soon as
@@ -263,8 +238,6 @@ pub struct CoreRuntime {
     telemetry: TelemetryInstance,
     runtime: Option<tokio::runtime::Runtime>,
     runtime_handle: tokio::runtime::Handle,
-    shared_namespace_map: Arc<Mutex<HashMap<ClientIdentity, SharedNamespaceWorker>>>,
-    task_queue_key: Uuid,
     heartbeat_interval: Option<Duration>,
 }
 
@@ -278,18 +251,8 @@ pub struct RuntimeOptions {
     telemetry_options: TelemetryOptions,
     /// Optional worker heartbeat interval - This configures the heartbeat setting of all
     /// workers created using this runtime.
-    #[builder(default)]
+    #[builder(default = Some(Duration::from_secs(60)))]
     heartbeat_interval: Option<Duration>,
-}
-
-impl RuntimeOptions {
-    /// Creates new runtime options.
-    pub fn new(telemetry_options: TelemetryOptions, heartbeat_interval: Option<Duration>) -> Self {
-        Self {
-            telemetry_options,
-            heartbeat_interval,
-        }
-    }
 }
 
 /// Wraps a [tokio::runtime::Builder] to allow layering multiple on_thread_start functions
@@ -381,8 +344,6 @@ impl CoreRuntime {
             telemetry,
             runtime: None,
             runtime_handle,
-            shared_namespace_map: Arc::new(Mutex::new(HashMap::new())),
-            task_queue_key: Uuid::new_v4(),
             heartbeat_interval,
         }
     }

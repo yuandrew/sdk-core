@@ -18,8 +18,9 @@ pub(crate) use activities::{
     NewLocalAct,
 };
 pub(crate) use wft_poller::WFTPollerShared;
-pub(crate) use workflow::LEGACY_QUERY_ID;
+pub use workflow::LEGACY_QUERY_ID;
 
+use crate::worker::heartbeat::{HeartbeatFn, SharedNamespaceWorker};
 use crate::telemetry::InMemoryMeter;
 use crate::telemetry::metrics::STICKY_CACHE_SIZE_NAME;
 use crate::worker::heartbeat::HeartbeatFn;
@@ -50,7 +51,10 @@ use crate::{
     worker::workflow::wft_poller,
 };
 use activities::WorkerActivityTasks;
+use anyhow::bail;
 use futures_util::{StreamExt, stream};
+use gethostname::gethostname;
+use parking_lot::{Mutex, RwLock};
 use gethostname::gethostname;
 use itertools::Itertools;
 use opentelemetry::Value;
@@ -67,11 +71,16 @@ use std::{
     },
     time::Duration,
 };
-use temporal_client::{ConfiguredClient, TemporalServiceClientWithMetrics, WorkerKey};
+use temporal_client::{ClientWorker, HeartbeatCallback, Slot as SlotTrait};
+use temporal_client::{
+    ConfiguredClient, SharedNamespaceWorkerTrait, TemporalServiceClientWithMetrics,
+};
+use temporal_sdk_core_api::telemetry::metrics::TemporalMeter;
 use temporal_sdk_core_api::{
     errors::{CompleteNexusError, WorkerValidationError},
     worker::PollerBehavior,
 };
+use temporal_sdk_core_protos::temporal::api::worker::v1::{WorkerHeartbeat, WorkerHostInfo};
 use temporal_sdk_core_protos::temporal::api::worker::v1::{
     WorkerHeartbeat, WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo,
 };
@@ -93,8 +102,9 @@ use temporal_sdk_core_protos::{
 use tokio::sync::{OnceCell, mpsc::unbounded_channel, watch};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Subscriber;
 use uuid::Uuid;
-#[cfg(test)]
+#[cfg(any(feature = "test-utilities", test))]
 use {
     crate::{
         pollers::{BoxedPoller, MockPermittedPollBuffer},
@@ -120,8 +130,8 @@ use tracing::Subscriber;
 pub struct Worker {
     config: WorkerConfig,
     client: Arc<dyn WorkerClient>,
-    /// Registration key to enable eager workflow start for this worker
-    worker_key: Mutex<Option<WorkerKey>>,
+    /// Worker instance key, unique identifier for this worker
+    worker_instance_key: Uuid,
     /// Manages all workflows and WFT processing
     workflows: Workflows,
     /// Manages activity tasks for this worker/task queue
@@ -136,13 +146,15 @@ pub struct Worker {
     shutdown_token: CancellationToken,
     /// Will be called at the end of each activation completion
     #[allow(clippy::type_complexity)] // Sorry clippy, there's no simple way to re-use here.
-    post_activate_hook: Option<Box<dyn Fn(&Self, PostActivateHookData) + Send + Sync>>,
+    post_activate_hook: Option<Box<dyn Fn(&Self, PostActivateHookData<'_>) + Send + Sync>>,
     /// Set when non-local activities are complete and should stop being polled
     non_local_activities_complete: Arc<AtomicBool>,
     /// Set when local activities are complete and should stop being polled
     local_activities_complete: Arc<AtomicBool>,
     /// Used to track all permits have been released
     all_permits_tracker: tokio::sync::Mutex<AllPermitsTracker>,
+    /// Used to track worker client
+    client_worker_registrator: Arc<ClientWorkerRegistrator>,
 }
 
 struct AllPermitsTracker {
@@ -194,6 +206,7 @@ impl WorkerHeartbeatManager {
         nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
     ) -> Self {
         let worker_identity = client.get_identity();
+        let worker_instance_key_clone = worker_instance_key.to_string();
         let task_queue = config.task_queue.clone();
         let sdk_name_and_ver = client.sdk_name_and_version();
         let deployment_version = config.computed_deployment_version();
@@ -205,7 +218,7 @@ impl WorkerHeartbeatManager {
         let config_clone = config.clone();
 
         let worker_heartbeat_callback: HeartbeatFn = Box::new(move || {
-            let mut sticky_cache_size = 0;
+        let mut sticky_cache_size = 0;
             let mut total_sticky_cache_hit = 0;
             let mut total_sticky_cache_miss = 0;
             let mut wft_current_pollers = 0;
@@ -390,8 +403,7 @@ impl WorkerHeartbeatManager {
                 }),
                 task_queue: task_queue.clone(),
                 deployment_version: deployment_version.clone(),
-                sdk_name: sdk_name_and_ver.clone().0,
-                sdk_version: sdk_name_and_ver.clone().1,
+
                 status: 0, // TODO
                 start_time: Some(std::time::SystemTime::now().into()),
                 workflow_task_slots_info,
@@ -399,7 +411,7 @@ impl WorkerHeartbeatManager {
                 nexus_task_slots_info,
                 local_activity_slots_info,
                 workflow_poller_info,
-                workflow_sticky_poller_info, // TODO: should this be none if no cache not used?
+                workflow_sticky_poller_info,
                 activity_poller_info,
                 nexus_poller_info,
                 total_sticky_cache_hit: total_sticky_cache_hit as i32,
@@ -407,9 +419,14 @@ impl WorkerHeartbeatManager {
                 current_sticky_cache_size: sticky_cache_size as i32,
                 plugins: vec![], // TODO:
 
-                // These values are set at heartbeat time by SharedNamespaceWorker
+                // sdk_name, sdk_version, and worker_identity must be set by
+                // SharedNamespaceWorker because they rely on the client, and
+                // need to be pulled from the current client used by SharedNamespaceWorker
                 heartbeat_time: None,
                 elapsed_since_last_heartbeat: None,
+                sdk_name: 0,
+                sdk_version: 0,
+
             }
         });
 
@@ -516,10 +533,20 @@ impl WorkerTrait for Worker {
             );
         }
         self.shutdown_token.cancel();
-        // First, disable Eager Workflow Start
-        if let Some(key) = *self.worker_key.lock() {
-            self.client.workers().unregister(key);
+        // First, unregister worker from the client
+        if let Err(e) = self
+            .client
+            .workers()
+            .unregister_worker(self.worker_instance_key)
+        {
+            error!(
+                task_queue=%self.config.task_queue,
+                namespace=%self.config.namespace,
+                error=%e,
+                "Failed to unregister worker on shutdown",
+            );
         }
+
         // Second, we want to stop polling of both activity and workflow tasks
         if let Some(atm) = self.at_task_mgr.as_ref() {
             atm.initiate_shutdown();
@@ -559,7 +586,8 @@ impl Worker {
         telem_instance: Option<&TelemetryInstance>,
         in_memory_meter: Option<Arc<InMemoryMeter>>,
         worker_heartbeat_interval: Option<Duration>,
-    ) -> Self {
+        shared_namespace_worker: bool,
+    ) -> Result<Worker, anyhow::Error> {
         info!(task_queue=%config.task_queue, namespace=%config.namespace, "Initializing worker");
 
         Self::new_with_pollers(
@@ -570,27 +598,42 @@ impl Worker {
             telem_instance,
             in_memory_meter,
             worker_heartbeat_interval,
+            shared_namespace_worker,
         )
     }
 
-    /// Replace client and return a new client. For eager workflow purposes, this new client will
-    /// now apply to future eager start requests and the older client will not.
-    pub fn replace_client(&self, new_client: ConfiguredClient<TemporalServiceClientWithMetrics>) {
+    /// Replace client and return a new client.
+    ///
+    /// For eager workflow purposes, this new client will now apply to future eager start requests
+    /// and the older client will not. Note, if this registration fails, the worker heartbeat will
+    /// also not be registered.
+    ///
+    /// For worker heartbeat, this will remove an existing shared worker if it is the last worker of
+    /// the old client and create a new nexus worker if it's the first client of the namespace on
+    /// the new client.
+    pub fn replace_client(
+        &self,
+        new_client: ConfiguredClient<TemporalServiceClientWithMetrics>,
+    ) -> Result<(), anyhow::Error> {
         // Unregister worker from current client, register in new client at the end
-        let mut worker_key = self.worker_key.lock();
-        let slot_provider = (*worker_key).and_then(|k| self.client.workers().unregister(k));
-        self.client.replace_client(super::init_worker_client(
+        let client_worker = self
+            .client
+            .workers()
+            .unregister_worker(self.worker_instance_key)?;
+        let new_worker_client = super::init_worker_client(
             self.config.namespace.clone(),
             self.config.client_identity_override.clone(),
             new_client,
-        ));
-        *worker_key =
-            slot_provider.and_then(|slot_provider| self.client.workers().register(slot_provider));
+        );
+
+        self.client.replace_client(new_worker_client);
+        *self.client_worker_registrator.client.write() = self.client.clone();
+        self.client.workers().register_worker(client_worker)
     }
 
     #[cfg(test)]
     pub(crate) fn new_test(config: WorkerConfig, client: impl WorkerClient + 'static) -> Self {
-        Self::new(config, None, Arc::new(client), None, None, None)
+        Self::new(config, None, Arc::new(client), None, None, false).unwrap()
     }
 
     pub(crate) fn new_with_pollers(
@@ -601,7 +644,8 @@ impl Worker {
         telem_instance: Option<&TelemetryInstance>,
         in_memory_meter: Option<Arc<InMemoryMeter>>,
         worker_heartbeat_interval: Option<Duration>,
-    ) -> Self {
+        shared_namespace_worker: bool,
+    ) -> Result<Worker, anyhow::Error> {
         let worker_telemetry = telem_instance.map(|telem| WorkerTelemetry {
             metric_meter: telem.get_metric_meter(),
             temporal_metric_meter: telem.get_temporal_metric_meter(),
@@ -617,6 +661,7 @@ impl Worker {
             worker_telemetry,
             in_memory_meter,
             worker_heartbeat_interval,
+            shared_namespace_worker,
         )
     }
 
@@ -628,8 +673,9 @@ impl Worker {
         worker_telemetry: Option<WorkerTelemetry>,
         in_memory_meter: Option<Arc<InMemoryMeter>>,
         worker_heartbeat_interval: Option<Duration>,
-    ) -> Self {
-        let shared_namespace_worker = in_memory_meter.is_none();
+        shared_namespace_worker: bool, // TODO: is this unnecessary?
+    ) -> Result<Worker, anyhow::Error> {
+        // let shared_namespace_worker = in_memory_meter.is_none();
         let (metrics, meter) = if let Some(wt) = worker_telemetry.as_ref() {
             (
                 MetricsContext::top_level_with_meter(
@@ -643,6 +689,7 @@ impl Worker {
         } else {
             (MetricsContext::no_op(), None)
         };
+
         let tuner = config
             .tuner
             .as_ref()
@@ -653,7 +700,7 @@ impl Worker {
         let shutdown_token = CancellationToken::new();
         let slot_context_data = Arc::new(PermitDealerContextData {
             task_queue: config.task_queue.clone(),
-            worker_identity: client.get_identity(),
+            worker_identity: client.identity(),
             worker_deployment_version: config.computed_deployment_version(),
         });
         let wft_slots = MeteredPermitDealer::new(
@@ -730,7 +777,7 @@ impl Worker {
                         shutdown_token.child_token(),
                         Some(move |np| act_metrics.record_num_pollers(np)),
                         ActivityTaskOptions {
-                            max_worker_acts_per_second: config.max_task_queue_activities_per_second,
+                            max_worker_acts_per_second: config.max_worker_activities_per_second,
                             max_tps: config.max_task_queue_activities_per_second,
                         },
                         act_last_suc_poll_time.clone(),
@@ -751,11 +798,11 @@ impl Worker {
                     shared_namespace_worker,
                 )) as BoxedNexusPoller;
 
-                #[cfg(test)]
+                #[cfg(any(feature = "test-utilities", test))]
                 let wft_stream = wft_stream.left_stream();
                 (wft_stream, act_poll_buffer, nexus_poll_buffer)
             }
-            #[cfg(test)]
+            #[cfg(any(feature = "test-utilities", test))]
             TaskPollers::Mocked {
                 wft_stream,
                 act_poller,
@@ -827,11 +874,9 @@ impl Worker {
             wft_slots.clone(),
             external_wft_tx,
         );
-        let worker_key = Mutex::new(client.workers().register(Box::new(provider)));
-        let sdk_name_and_ver = client.sdk_name_and_version();
-
         let worker_instance_key = Uuid::new_v4();
 
+        let sdk_name_and_ver = client.sdk_name_and_version();
         let worker_heartbeat = worker_heartbeat_interval.map(|hb_interval| {
             WorkerHeartbeatManager::new(
                 client.clone(),
@@ -851,8 +896,21 @@ impl Worker {
             )
         });
 
-        Self {
-            worker_key,
+        let client_worker_registrator = Arc::new(ClientWorkerRegistrator {
+            worker_instance_key,
+            slot_provider: provider,
+            heartbeat_manager: worker_heartbeat,
+            client: RwLock::new(client.clone()),
+        });
+
+        if !shared_namespace_worker {
+            client
+                .workers()
+                .register_worker(client_worker_registrator.clone())?;
+        }
+
+        Ok(Self {
+            worker_instance_key,
             client: client.clone(),
             workflows: Workflows::new(
                 WorkflowBasics {
@@ -909,8 +967,8 @@ impl Worker {
                 la_permits,
             }),
             nexus_mgr,
-            worker_heartbeat,
-        }
+            client_worker_registrator,
+        })
     }
 
     /// Will shutdown the worker. Does not resolve until all outstanding workflow tasks have been
@@ -953,12 +1011,6 @@ impl Worker {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
                 dbg_panic!("Waiting for all slot permits to release took too long!");
             }
-        }
-        // If this worker is tracked by SharedNamespaceWorker, remove entry from SharedNamespaceWorker
-        if let Some(worker_heartbeat) = self.worker_heartbeat.as_ref()
-            && let Some(shutdown_callback) = worker_heartbeat.shutdown_callback.get()
-        {
-            shutdown_callback();
         }
     }
 
@@ -1168,7 +1220,7 @@ impl Worker {
     /// Sets a function to be called at the end of each activation completion
     pub(crate) fn set_post_activate_hook(
         &mut self,
-        callback: impl Fn(&Self, PostActivateHookData) + Send + Sync + 'static,
+        callback: impl Fn(&Self, PostActivateHookData<'_>) + Send + Sync + 'static,
     ) {
         self.post_activate_hook = Some(Box::new(callback))
     }
@@ -1248,6 +1300,63 @@ fn is_wft<T>(dp: &GaugeDataPoint<T>) -> bool {
     })
 }
 
+struct ClientWorkerRegistrator {
+    worker_instance_key: Uuid,
+    slot_provider: SlotProvider,
+    heartbeat_manager: Option<WorkerHeartbeatManager>,
+    client: RwLock<Arc<dyn WorkerClient>>,
+}
+
+impl ClientWorker for ClientWorkerRegistrator {
+    fn namespace(&self) -> &str {
+        self.slot_provider.namespace()
+    }
+    fn task_queue(&self) -> &str {
+        self.slot_provider.task_queue()
+    }
+
+    fn try_reserve_wft_slot(&self) -> Option<Box<dyn SlotTrait + Send>> {
+        self.slot_provider.try_reserve_wft_slot()
+    }
+
+    fn worker_instance_key(&self) -> Uuid {
+        self.worker_instance_key
+    }
+
+    fn heartbeat_enabled(&self) -> bool {
+        self.heartbeat_manager.is_some()
+    }
+
+    fn heartbeat_callback(&self) -> Option<HeartbeatCallback> {
+        if let Some(hb_mgr) = self.heartbeat_manager.as_ref() {
+            let mut heartbeat_manager = hb_mgr.heartbeat_callback.lock();
+            heartbeat_manager.take()
+        } else {
+            None
+        }
+    }
+    fn new_shared_namespace_worker(
+        &self,
+    ) -> Result<Box<dyn SharedNamespaceWorkerTrait + Send + Sync>, anyhow::Error> {
+        if let Some(ref hb_mgr) = self.heartbeat_manager {
+            Ok(Box::new(SharedNamespaceWorker::new(
+                self.client.read().clone(),
+                self.namespace().to_string(),
+                hb_mgr.heartbeat_interval,
+                hb_mgr.telemetry.clone(),
+            )?))
+        } else {
+            bail!("Shared namespace worker creation never be called without a heartbeat manager");
+        }
+    }
+
+    fn register_callback(&self, callback: HeartbeatCallback) {
+        if let Some(hb_mgr) = self.heartbeat_manager.as_ref() {
+            hb_mgr.heartbeat_callback.lock().replace(callback);
+        }
+    }
+}
+
 pub(crate) struct PostActivateHookData<'a> {
     pub(crate) run_id: &'a str,
     pub(crate) replaying: bool,
@@ -1255,7 +1364,7 @@ pub(crate) struct PostActivateHookData<'a> {
 
 pub(crate) enum TaskPollers {
     Real,
-    #[cfg(test)]
+    #[cfg(any(feature = "test-utilities", test))]
     Mocked {
         wft_stream: BoxStream<'static, Result<ValidPollWFTQResponse, tonic::Status>>,
         act_poller: Option<BoxedPoller<PollActivityTaskQueueResponse>>,

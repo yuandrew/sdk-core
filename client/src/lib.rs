@@ -7,8 +7,11 @@
 #[macro_use]
 extern crate tracing;
 
+pub mod callback_based;
 mod metrics;
-mod proxy;
+/// Visible only for tests
+#[doc(hidden)]
+pub mod proxy;
 mod raw;
 mod retry;
 mod worker_registry;
@@ -29,13 +32,15 @@ pub use temporal_sdk_core_protos::temporal::api::{
     },
 };
 pub use tonic;
-pub use worker_registry::{Slot, SlotManager, SlotProvider, WorkerKey};
+pub use worker_registry::{
+    ClientWorker, ClientWorkerSet, HeartbeatCallback, SharedNamespaceWorkerTrait, Slot,
+};
 pub use workflow_handle::{
     GetWorkflowResultOpts, WorkflowExecutionInfo, WorkflowExecutionResult, WorkflowHandle,
 };
 
 use crate::{
-    metrics::{GrpcMetricSvc, MetricsContext},
+    metrics::{ChannelOrGrpcOverride, GrpcMetricSvc, MetricsContext},
     raw::{AttachMetricLabels, sealed::RawClientLike},
     sealed::WfHandleClient,
     workflow_handle::UntypedWorkflowHandle,
@@ -75,7 +80,10 @@ use tonic::{
     body::Body,
     client::GrpcService,
     codegen::InterceptedService,
-    metadata::{MetadataKey, MetadataMap, MetadataValue},
+    metadata::{
+        AsciiMetadataKey, AsciiMetadataValue, BinaryMetadataKey, BinaryMetadataValue, MetadataMap,
+        MetadataValue,
+    },
     service::Interceptor,
     transport::{Certificate, Channel, Endpoint, Identity},
 };
@@ -143,8 +151,19 @@ pub struct ClientOptions {
     pub keep_alive: Option<ClientKeepAliveConfig>,
 
     /// HTTP headers to include on every RPC call.
+    ///
+    /// These must be valid gRPC metadata keys, and must not be binary metadata keys (ending in
+    /// `-bin). To set binary headers, use [ClientOptions::binary_headers]. Invalid header keys or
+    /// values will cause an error to be returned when connecting.
     #[builder(default)]
     pub headers: Option<HashMap<String, String>>,
+
+    /// HTTP headers to include on every RPC call as binary gRPC metadata (encoded as base64).
+    ///
+    /// These must be valid binary gRPC metadata keys (and end with a `-bin` suffix). Invalid
+    /// header keys will cause an error to be returned when connecting.
+    #[builder(default)]
+    pub binary_headers: Option<HashMap<String, Vec<u8>>>,
 
     /// API key which is set as the "Authorization" header with "Bearer " prepended. This will only
     /// be applied if the headers don't already have an "Authorization" header.
@@ -319,6 +338,9 @@ pub enum ClientInitError {
     /// Invalid URI. Configuration error, fatal.
     #[error("Invalid URI: {0:?}")]
     InvalidUri(#[from] InvalidUri),
+    /// Invalid gRPC metadata headers. Configuration error.
+    #[error("Invalid headers: {0}")]
+    InvalidHeaders(#[from] InvalidHeaderError),
     /// Server connection error. Crashing and restarting the worker is likely best.
     #[error("Server connection error: {0:?}")]
     TonicTransportError(#[from] tonic::transport::Error),
@@ -326,6 +348,37 @@ pub enum ClientInitError {
     /// server capabilities / verify server is responding.
     #[error("`get_system_info` call error after connection: {0:?}")]
     SystemInfoCallError(tonic::Status),
+}
+
+/// Errors thrown when a gRPC metadata header is invalid.
+#[derive(thiserror::Error, Debug)]
+pub enum InvalidHeaderError {
+    /// A binary header key was invalid
+    #[error("Invalid binary header key '{key}': {source}")]
+    InvalidBinaryHeaderKey {
+        /// The invalid key
+        key: String,
+        /// The source error from tonic
+        source: tonic::metadata::errors::InvalidMetadataKey,
+    },
+    /// An ASCII header key was invalid
+    #[error("Invalid ASCII header key '{key}': {source}")]
+    InvalidAsciiHeaderKey {
+        /// The invalid key
+        key: String,
+        /// The source error from tonic
+        source: tonic::metadata::errors::InvalidMetadataKey,
+    },
+    /// An ASCII header value was invalid
+    #[error("Invalid ASCII header value for key '{key}': {source}")]
+    InvalidAsciiHeaderValue {
+        /// The key
+        key: String,
+        /// The invalid value
+        value: String,
+        /// The source error from tonic
+        source: tonic::metadata::errors::InvalidMetadataValue,
+    },
 }
 
 /// A client with [ClientOptions] attached, which can be passed to initialize workers,
@@ -337,13 +390,37 @@ pub struct ConfiguredClient<C> {
     headers: Arc<RwLock<ClientHeaders>>,
     /// Capabilities as read from the `get_system_info` RPC call made on client connection
     capabilities: Option<get_system_info_response::Capabilities>,
-    workers: Arc<SlotManager>,
+    workers: Arc<ClientWorkerSet>,
 }
 
 impl<C> ConfiguredClient<C> {
-    /// Set HTTP request headers overwriting previous headers
-    pub fn set_headers(&self, headers: HashMap<String, String>) {
-        self.headers.write().user_headers = headers;
+    /// Set HTTP request headers overwriting previous headers.
+    ///
+    /// This will not affect headers set via [ClientOptions::binary_headers].
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if any of the provided keys or values are not valid gRPC metadata.
+    /// If an error is returned, the previous headers will remain unchanged.
+    pub fn set_headers(&self, headers: HashMap<String, String>) -> Result<(), InvalidHeaderError> {
+        self.headers.write().user_headers = parse_ascii_headers(headers)?;
+        Ok(())
+    }
+
+    /// Set binary HTTP request headers overwriting previous headers.
+    ///
+    /// This will not affect headers set via [ClientOptions::headers].
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if any of the provided keys are not valid gRPC binary metadata keys.
+    /// If an error is returned, the previous headers will remain unchanged.
+    pub fn set_binary_headers(
+        &self,
+        binary_headers: HashMap<String, Vec<u8>>,
+    ) -> Result<(), InvalidHeaderError> {
+        self.headers.write().user_binary_headers = parse_binary_headers(binary_headers)?;
+        Ok(())
     }
 
     /// Set API key, overwriting previous
@@ -363,14 +440,20 @@ impl<C> ConfiguredClient<C> {
     }
 
     /// Returns a cloned reference to a registry with workers using this client instance
-    pub fn workers(&self) -> Arc<SlotManager> {
+    pub fn workers(&self) -> Arc<ClientWorkerSet> {
         self.workers.clone()
+    }
+
+    /// Returns the worker set key, this should be unique across each client
+    pub fn worker_set_key(&self) -> Uuid {
+        self.workers.worker_set_key()
     }
 }
 
 #[derive(Debug)]
 struct ClientHeaders {
-    user_headers: HashMap<String, String>,
+    user_headers: HashMap<AsciiMetadataKey, AsciiMetadataValue>,
+    user_binary_headers: HashMap<BinaryMetadataKey, BinaryMetadataValue>,
     api_key: Option<String>,
 }
 
@@ -379,10 +462,13 @@ impl ClientHeaders {
         for (key, val) in self.user_headers.iter() {
             // Only if not already present
             if !metadata.contains_key(key) {
-                // Ignore invalid keys/values
-                if let (Ok(key), Ok(val)) = (MetadataKey::from_str(key), val.parse()) {
-                    metadata.insert(key, val);
-                }
+                metadata.insert(key, val.clone());
+            }
+        }
+        for (key, val) in self.user_binary_headers.iter() {
+            // Only if not already present
+            if !metadata.contains_key(key) {
+                metadata.insert_bin(key, val.clone());
             }
         }
         if let Some(api_key) = &self.api_key {
@@ -434,36 +520,64 @@ impl ClientOptions {
         metrics_meter: Option<TemporalMeter>,
     ) -> Result<RetryClient<ConfiguredClient<TemporalServiceClientWithMetrics>>, ClientInitError>
     {
-        let channel = Channel::from_shared(self.target_url.to_string())?;
-        let channel = self.add_tls_to_channel(channel).await?;
-        let channel = if let Some(keep_alive) = self.keep_alive.as_ref() {
-            channel
-                .keep_alive_while_idle(true)
-                .http2_keep_alive_interval(keep_alive.interval)
-                .keep_alive_timeout(keep_alive.timeout)
-        } else {
-            channel
-        };
-        let channel = if let Some(origin) = self.override_origin.clone() {
-            channel.origin(origin)
-        } else {
-            channel
-        };
-        // If there is a proxy, we have to connect that way
-        let channel = if let Some(proxy) = self.http_connect_proxy.as_ref() {
-            proxy.connect_endpoint(&channel).await?
-        } else {
-            channel.connect().await?
-        };
-        let service = ServiceBuilder::new()
-            .layer_fn(move |channel| GrpcMetricSvc {
-                inner: channel,
+        self.connect_no_namespace_with_service_override(metrics_meter, None)
+            .await
+    }
+
+    /// Attempt to establish a connection to the Temporal server and return a gRPC client which is
+    /// intercepted with retry, default headers functionality, and metrics if provided. If a
+    /// service_override is present, network-specific options are ignored and the callback is
+    /// invoked for each gRPC call.
+    ///
+    /// See [RetryClient] for more
+    pub async fn connect_no_namespace_with_service_override(
+        &self,
+        metrics_meter: Option<TemporalMeter>,
+        service_override: Option<callback_based::CallbackBasedGrpcService>,
+    ) -> Result<RetryClient<ConfiguredClient<TemporalServiceClientWithMetrics>>, ClientInitError>
+    {
+        let service = if let Some(service_override) = service_override {
+            GrpcMetricSvc {
+                inner: ChannelOrGrpcOverride::GrpcOverride(service_override),
                 metrics: metrics_meter.clone().map(MetricsContext::new),
                 disable_errcode_label: self.disable_error_code_metric_tags,
-            })
-            .service(channel);
+            }
+        } else {
+            let channel = Channel::from_shared(self.target_url.to_string())?;
+            let channel = self.add_tls_to_channel(channel).await?;
+            let channel = if let Some(keep_alive) = self.keep_alive.as_ref() {
+                channel
+                    .keep_alive_while_idle(true)
+                    .http2_keep_alive_interval(keep_alive.interval)
+                    .keep_alive_timeout(keep_alive.timeout)
+            } else {
+                channel
+            };
+            let channel = if let Some(origin) = self.override_origin.clone() {
+                channel.origin(origin)
+            } else {
+                channel
+            };
+            // If there is a proxy, we have to connect that way
+            let channel = if let Some(proxy) = self.http_connect_proxy.as_ref() {
+                proxy.connect_endpoint(&channel).await?
+            } else {
+                channel.connect().await?
+            };
+            ServiceBuilder::new()
+                .layer_fn(move |channel| GrpcMetricSvc {
+                    inner: ChannelOrGrpcOverride::Channel(channel),
+                    metrics: metrics_meter.clone().map(MetricsContext::new),
+                    disable_errcode_label: self.disable_error_code_metric_tags,
+                })
+                .service(channel)
+        };
+
         let headers = Arc::new(RwLock::new(ClientHeaders {
-            user_headers: self.headers.clone().unwrap_or_default(),
+            user_headers: parse_ascii_headers(self.headers.clone().unwrap_or_default())?,
+            user_binary_headers: parse_binary_headers(
+                self.binary_headers.clone().unwrap_or_default(),
+            )?,
             api_key: self.api_key.clone(),
         }));
         let interceptor = ServiceCallInterceptor {
@@ -477,7 +591,7 @@ impl ClientOptions {
             client: TemporalServiceClient::new(svc),
             options: Arc::new(self.clone()),
             capabilities: None,
-            workers: Arc::new(SlotManager::new()),
+            workers: Arc::new(ClientWorkerSet::new()),
         };
         if !self.skip_get_system_info {
             match client
@@ -528,6 +642,57 @@ impl ClientOptions {
         }
         Ok(channel)
     }
+}
+
+fn parse_ascii_headers(
+    headers: HashMap<String, String>,
+) -> Result<HashMap<AsciiMetadataKey, AsciiMetadataValue>, InvalidHeaderError> {
+    let mut parsed_headers = HashMap::with_capacity(headers.len());
+    for (k, v) in headers.into_iter() {
+        let key = match AsciiMetadataKey::from_str(&k) {
+            Ok(key) => key,
+            Err(err) => {
+                return Err(InvalidHeaderError::InvalidAsciiHeaderKey {
+                    key: k,
+                    source: err,
+                });
+            }
+        };
+        let value = match MetadataValue::from_str(&v) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(InvalidHeaderError::InvalidAsciiHeaderValue {
+                    key: k,
+                    value: v,
+                    source: err,
+                });
+            }
+        };
+        parsed_headers.insert(key, value);
+    }
+
+    Ok(parsed_headers)
+}
+
+fn parse_binary_headers(
+    headers: HashMap<String, Vec<u8>>,
+) -> Result<HashMap<BinaryMetadataKey, BinaryMetadataValue>, InvalidHeaderError> {
+    let mut parsed_headers = HashMap::with_capacity(headers.len());
+    for (k, v) in headers.into_iter() {
+        let key = match BinaryMetadataKey::from_str(&k) {
+            Ok(key) => key,
+            Err(err) => {
+                return Err(InvalidHeaderError::InvalidBinaryHeaderKey {
+                    key: k,
+                    source: err,
+                });
+            }
+        };
+        let value = BinaryMetadataValue::from_bytes(&v);
+        parsed_headers.insert(key, value);
+    }
+
+    Ok(parsed_headers)
 }
 
 /// Interceptor which attaches common metadata (like "client-name") to every outgoing call
@@ -742,6 +907,11 @@ impl Client {
     /// Consumes self and returns the underlying client
     pub fn into_inner(self) -> ConfiguredClient<TemporalServiceClientWithMetrics> {
         self.inner
+    }
+
+    /// Returns the client-wide key
+    pub fn worker_set_key(&self) -> Uuid {
+        self.inner.worker_set_key()
     }
 }
 
@@ -1742,13 +1912,17 @@ mod tests {
         // Initial header set
         let headers = Arc::new(RwLock::new(ClientHeaders {
             user_headers: HashMap::new(),
+            user_binary_headers: HashMap::new(),
             api_key: Some("my-api-key".to_owned()),
         }));
-        headers
-            .clone()
-            .write()
-            .user_headers
-            .insert("my-meta-key".to_owned(), "my-meta-val".to_owned());
+        headers.clone().write().user_headers.insert(
+            "my-meta-key".parse().unwrap(),
+            "my-meta-val".parse().unwrap(),
+        );
+        headers.clone().write().user_binary_headers.insert(
+            "my-bin-meta-key-bin".parse().unwrap(),
+            vec![1, 2, 3].try_into().unwrap(),
+        );
         let mut interceptor = ServiceCallInterceptor {
             opts,
             headers: headers.clone(),
@@ -1761,6 +1935,10 @@ mod tests {
             req.metadata().get("authorization").unwrap(),
             "Bearer my-api-key"
         );
+        assert_eq!(
+            req.metadata().get_bin("my-bin-meta-key-bin").unwrap(),
+            vec![1, 2, 3].as_slice()
+        );
 
         // Overwrite at request time
         let mut req = tonic::Request::new(());
@@ -1768,26 +1946,33 @@ mod tests {
             .insert("my-meta-key", "my-meta-val2".parse().unwrap());
         req.metadata_mut()
             .insert("authorization", "my-api-key2".parse().unwrap());
+        req.metadata_mut()
+            .insert_bin("my-bin-meta-key-bin", vec![4, 5, 6].try_into().unwrap());
         let req = interceptor.call(req).unwrap();
         assert_eq!(req.metadata().get("my-meta-key").unwrap(), "my-meta-val2");
         assert_eq!(req.metadata().get("authorization").unwrap(), "my-api-key2");
+        assert_eq!(
+            req.metadata().get_bin("my-bin-meta-key-bin").unwrap(),
+            vec![4, 5, 6].as_slice()
+        );
 
         // Overwrite auth on header
-        headers
-            .clone()
-            .write()
-            .user_headers
-            .insert("authorization".to_owned(), "my-api-key3".to_owned());
+        headers.clone().write().user_headers.insert(
+            "authorization".parse().unwrap(),
+            "my-api-key3".parse().unwrap(),
+        );
         let req = interceptor.call(tonic::Request::new(())).unwrap();
         assert_eq!(req.metadata().get("my-meta-key").unwrap(), "my-meta-val");
         assert_eq!(req.metadata().get("authorization").unwrap(), "my-api-key3");
 
         // Remove headers and auth and confirm gone
         headers.clone().write().user_headers.clear();
+        headers.clone().write().user_binary_headers.clear();
         headers.clone().write().api_key.take();
         let req = interceptor.call(tonic::Request::new(())).unwrap();
         assert!(!req.metadata().contains_key("my-meta-key"));
         assert!(!req.metadata().contains_key("authorization"));
+        assert!(!req.metadata().contains_key("my-bin-meta-key-bin"));
 
         // Timeout header not overriden
         let mut req = tonic::Request::new(());
@@ -1797,6 +1982,55 @@ mod tests {
         assert_eq!(
             req.metadata().get("grpc-timeout").unwrap(),
             "1S".parse::<MetadataValue<Ascii>>().unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_ascii_header_key() {
+        let invalid_headers = {
+            let mut h = HashMap::new();
+            h.insert("x-binary-key-bin".to_owned(), "value".to_owned());
+            h
+        };
+
+        let result = parse_ascii_headers(invalid_headers);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Invalid ASCII header key 'x-binary-key-bin': invalid gRPC metadata key name"
+        );
+    }
+
+    #[test]
+    fn invalid_ascii_header_value() {
+        let invalid_headers = {
+            let mut h = HashMap::new();
+            // Nul bytes are valid UTF-8, but not valid ascii gRPC headers:
+            h.insert("x-ascii-key".to_owned(), "\x00value".to_owned());
+            h
+        };
+
+        let result = parse_ascii_headers(invalid_headers);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Invalid ASCII header value for key 'x-ascii-key': failed to parse metadata value"
+        );
+    }
+
+    #[test]
+    fn invalid_binary_header_key() {
+        let invalid_headers = {
+            let mut h = HashMap::new();
+            h.insert("x-ascii-key".to_owned(), vec![1, 2, 3]);
+            h
+        };
+
+        let result = parse_binary_headers(invalid_headers);
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "Invalid binary header key 'x-ascii-key': invalid gRPC metadata key name"
         );
     }
 

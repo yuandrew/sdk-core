@@ -1,15 +1,13 @@
+use crate::common::{CoreWfStarter, NAMESPACE, eventually, get_integ_server_options};
 use assert_matches::assert_matches;
 use std::{sync::Arc, time::Duration};
 use temporal_client::{
     ListClosedFilters, ListOpenFilters, Namespace, RegisterNamespaceOptions, StartTimeFilter,
     WorkflowClientTrait, WorkflowExecutionFilter,
 };
+use temporal_sdk_core::test_help::{WorkerTestHelpers, drain_pollers_and_shutdown};
 use temporal_sdk_core_protos::coresdk::workflow_activation::{
     WorkflowActivationJob, workflow_activation_job,
-};
-use temporal_sdk_core_test_utils::{
-    CoreWfStarter, NAMESPACE, WorkerTestHelpers, drain_pollers_and_shutdown,
-    get_integ_server_options,
 };
 use tokio::time::sleep;
 
@@ -42,11 +40,30 @@ async fn client_list_open_closed_workflow_executions() {
         workflow_id: wf_name.clone(),
         run_id: "".to_owned(),
     });
-    let open_workflows = client
-        .list_open_workflow_executions(1, Default::default(), Some(start_time_filter), Some(filter))
-        .await
-        .unwrap();
-    assert_eq!(open_workflows.executions.len(), 1);
+    let open_workflows = eventually(
+        || async {
+            let open_workflows = client
+                .list_open_workflow_executions(
+                    1,
+                    Default::default(),
+                    Some(start_time_filter),
+                    Some(filter.clone()),
+                )
+                .await
+                .unwrap();
+            if open_workflows.executions.len() == 1 {
+                Ok(open_workflows)
+            } else {
+                Err(format!(
+                    "Expected 1 open workflow, got {}",
+                    open_workflows.executions.len()
+                ))
+            }
+        },
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
     let workflow = open_workflows.executions[0].clone();
     assert_eq!(workflow.execution.as_ref().unwrap().workflow_id, wf_name);
 

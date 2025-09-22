@@ -10,7 +10,7 @@
 //! ```no_run
 //! use std::{str::FromStr, sync::Arc};
 //! use temporal_sdk::{sdk_client_options, ActContext, Worker};
-//! use temporal_sdk_core::{init_worker, Url, CoreRuntime};
+//! use temporal_sdk_core::{init_worker, Url, CoreRuntime, RuntimeOptionsBuilder};
 //! use temporal_sdk_core_api::{
 //!     worker::{WorkerConfigBuilder, WorkerVersioningStrategy},
 //!     telemetry::TelemetryOptionsBuilder
@@ -21,11 +21,11 @@
 //!     use temporal_sdk_core::RuntimeOptionsBuilder;
 //! let server_options = sdk_client_options(Url::from_str("http://localhost:7233")?).build()?;
 //!
-//!     let client = server_options.connect("default", None).await?;
-//!
 //!     let telemetry_options = TelemetryOptionsBuilder::default().build()?;
 //!     let runtime_options = RuntimeOptionsBuilder::default().telemetry_options(telemetry_options).build().unwrap();
 //!     let runtime = CoreRuntime::new_assume_tokio(runtime_options)?;
+//!
+//!     let client = server_options.connect("default", None).await?;
 //!
 //!     let worker_config = WorkerConfigBuilder::default()
 //!         .namespace("default")

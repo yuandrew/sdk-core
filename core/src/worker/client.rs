@@ -2,16 +2,16 @@
 
 pub(crate) mod mocks;
 use crate::protosext::legacy_query_failure;
+use parking_lot::RwLock;
 use crate::worker::heartbeat::HeartbeatFn;
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use temporal_client::{
-    Client, IsWorkerTaskLongPoll, Namespace, NamespacedClient, NoRetryOnMatching, RetryClient,
-    SlotManager, WorkflowService,
+    Client, ClientWorkerSet, IsWorkerTaskLongPoll, Namespace, NamespacedClient, NoRetryOnMatching,
+    RetryClient, WorkflowService,
 };
 use temporal_sdk_core_api::worker::WorkerVersioningStrategy;
-use temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat;
 use temporal_sdk_core_protos::{
     TaskToken,
     coresdk::{workflow_commands::QueryResult, workflow_completion},
@@ -31,10 +31,12 @@ use temporal_sdk_core_protos::{
         query::v1::WorkflowQueryResult,
         sdk::v1::WorkflowTaskCompletedMetadata,
         taskqueue::v1::{StickyExecutionAttributes, TaskQueue, TaskQueueMetadata},
+        worker::v1::WorkerHeartbeat,
         workflowservice::v1::{get_system_info_response::Capabilities, *},
     },
 };
 use tonic::IntoRequest;
+use uuid::Uuid;
 
 type Result<T, E = tonic::Status> = std::result::Result<T, E>;
 
@@ -49,8 +51,6 @@ pub(crate) struct WorkerClientBag {
     namespace: String,
     identity: String,
     worker_versioning_strategy: WorkerVersioningStrategy,
-    /// This is only used in SharedNamespaceWorker
-    heartbeat_callbacks: Arc<Mutex<HashMap<String, HeartbeatFn>>>,
 }
 
 impl WorkerClientBag {
@@ -65,7 +65,6 @@ impl WorkerClientBag {
             namespace,
             identity,
             worker_versioning_strategy,
-            heartbeat_callbacks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -126,24 +125,6 @@ impl WorkerClientBag {
             None
         }
     }
-
-    fn capture_heartbeat(&self) -> Vec<WorkerHeartbeat> {
-        self.heartbeat_callbacks
-            .lock()
-            .values()
-            .map(|f| f())
-            .collect()
-    }
-}
-
-pub(crate) trait WorkerHeartbeatTrait {
-    fn get_heartbeat_map(&self) -> Arc<Mutex<HashMap<String, HeartbeatFn>>>;
-}
-
-impl WorkerHeartbeatTrait for WorkerClientBag {
-    fn get_heartbeat_map(&self) -> Arc<Mutex<HashMap<String, HeartbeatFn>>> {
-        self.heartbeat_callbacks.clone()
-    }
 }
 
 pub(crate) trait WorkerClientWithHeartbeat: WorkerClient + WorkerHeartbeatTrait {}
@@ -152,7 +133,7 @@ impl<T: WorkerClient + WorkerHeartbeatTrait> WorkerClientWithHeartbeat for T {}
 
 /// This trait contains everything workers need to interact with Temporal, and hence provides a
 /// minimal mocking surface. Delegates to [WorkflowClientTrait] so see that for details.
-#[cfg_attr(test, mockall::automock)]
+#[cfg_attr(any(feature = "test-utilities", test), mockall::automock)]
 #[async_trait::async_trait]
 pub trait WorkerClient: Sync + Send {
     /// Poll workflow tasks
@@ -242,7 +223,6 @@ pub trait WorkerClient: Sync + Send {
     async fn record_worker_heartbeat(
         &self,
         namespace: String,
-        identity: String,
         worker_heartbeat: Vec<WorkerHeartbeat>,
     ) -> Result<RecordWorkerHeartbeatResponse>;
 
@@ -251,13 +231,15 @@ pub trait WorkerClient: Sync + Send {
     /// Return server capabilities
     fn capabilities(&self) -> Option<Capabilities>;
     /// Return workers using this client
-    fn workers(&self) -> Arc<SlotManager>;
+    fn workers(&self) -> Arc<ClientWorkerSet>;
     /// Indicates if this is a mock client
     fn is_mock(&self) -> bool;
     /// Return name and version of the SDK
     fn sdk_name_and_version(&self) -> (String, String);
     /// Get worker identity
-    fn get_identity(&self) -> String;
+    fn identity(&self) -> String;
+    /// Get worker set key
+    fn worker_set_key(&self) -> Uuid;
 }
 
 /// Configuration options shared by workflow, activity, and Nexus polling calls
@@ -369,7 +351,7 @@ impl WorkerClient for WorkerClientBag {
     async fn poll_nexus_task(
         &self,
         poll_options: PollOptions,
-        send_heartbeat: bool,
+        _send_heartbeat: bool,
     ) -> Result<PollNexusTaskQueueResponse> {
         let worker_heartbeat = if send_heartbeat {
             self.capture_heartbeat()
@@ -388,7 +370,7 @@ impl WorkerClient for WorkerClientBag {
             identity: self.identity.clone(),
             worker_version_capabilities: self.worker_version_capabilities(),
             deployment_options: self.deployment_options(),
-            worker_heartbeat,
+            worker_heartbeat: Vec::new(),
         }
         .into_request();
         request.extensions_mut().insert(IsWorkerTaskLongPoll);
@@ -690,16 +672,16 @@ impl WorkerClient for WorkerClientBag {
     async fn record_worker_heartbeat(
         &self,
         namespace: String,
-        identity: String,
         worker_heartbeat: Vec<WorkerHeartbeat>,
     ) -> Result<RecordWorkerHeartbeatResponse> {
+        let request = RecordWorkerHeartbeatRequest {
+            namespace,
+            identity: self.identity.clone(),
+            worker_heartbeat,
+        };
         Ok(self
             .cloned_client()
-            .record_worker_heartbeat(RecordWorkerHeartbeatRequest {
-                namespace,
-                identity,
-                worker_heartbeat,
-            })
+            .record_worker_heartbeat(request)
             .await?
             .into_inner())
     }
@@ -714,7 +696,7 @@ impl WorkerClient for WorkerClientBag {
         client.get_client().inner().capabilities().cloned()
     }
 
-    fn workers(&self) -> Arc<SlotManager> {
+    fn workers(&self) -> Arc<ClientWorkerSet> {
         let client = self.replaceable_client.read();
         client.get_client().inner().workers()
     }
@@ -729,8 +711,12 @@ impl WorkerClient for WorkerClientBag {
         (opts.client_name.clone(), opts.client_version.clone())
     }
 
-    fn get_identity(&self) -> String {
+    fn identity(&self) -> String {
         self.identity.clone()
+    }
+
+    fn worker_set_key(&self) -> Uuid {
+        self.replaceable_client.read().get_client().worker_set_key()
     }
 }
 
