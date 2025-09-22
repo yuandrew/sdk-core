@@ -54,8 +54,10 @@ use futures_util::{StreamExt, stream};
 use gethostname::gethostname;
 use itertools::Itertools;
 use opentelemetry::Value;
+use opentelemetry::metrics::Meter;
 use parking_lot::{Mutex, RwLock};
 use slot_provider::SlotProvider;
+use std::time::SystemTime;
 use std::{
     convert::TryInto,
     future,
@@ -65,14 +67,14 @@ use std::{
     },
     time::Duration,
 };
-use std::time::SystemTime;
-use opentelemetry::metrics::Meter;
 use temporal_client::{ConfiguredClient, TemporalServiceClientWithMetrics, WorkerKey};
 use temporal_sdk_core_api::{
     errors::{CompleteNexusError, WorkerValidationError},
     worker::PollerBehavior,
 };
-use temporal_sdk_core_protos::temporal::api::worker::v1::{WorkerHeartbeat, WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo};
+use temporal_sdk_core_protos::temporal::api::worker::v1::{
+    WorkerHeartbeat, WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo,
+};
 use temporal_sdk_core_protos::{
     TaskToken,
     coresdk::{
@@ -106,10 +108,13 @@ use {
 // use opentelemetry_sdk::metrics::data::{Aggregation, Gauge, Sum};
 use opentelemetry_sdk::metrics::Aggregation;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, GaugeDataPoint, MetricData};
-use tracing::Subscriber;
 use temporal_sdk_core_api::telemetry::metrics::TemporalMeter;
-use temporal_sdk_core_api::worker::{ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind, WorkerDeploymentVersion, WorkflowSlotKind};
+use temporal_sdk_core_api::worker::{
+    ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind, WorkerDeploymentVersion,
+    WorkflowSlotKind,
+};
 use temporal_sdk_core_protos::temporal::api::deployment;
+use tracing::Subscriber;
 
 /// A worker polls on a certain task queue
 pub struct Worker {
@@ -184,9 +189,9 @@ impl WorkerHeartbeatManager {
         nexus_slots: MeteredPermitDealer<NexusSlotKind>,
         la_slots: MeteredPermitDealer<LocalActivitySlotKind>,
         wf_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
-        wf_sticky_last_suc_poll_time:Arc<Mutex<Option<SystemTime>>>,
-        act_last_suc_poll_time:Arc<Mutex<Option<SystemTime>>>,
-        nexus_last_suc_poll_time:Arc<Mutex<Option<SystemTime>>>,
+        wf_sticky_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        act_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
     ) -> Self {
         let worker_identity = client.get_identity();
         let task_queue = config.task_queue.clone();
@@ -222,137 +227,117 @@ impl WorkerHeartbeatManager {
                     for sm in metric.scope_metrics() {
                         // println!("\t\tscope {:?}", sm.scope());
                         for m in sm.metrics() {
-                            if m.name() == STICKY_CACHE_SIZE_NAME
-                                && let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) =
-                                m.data()
+                            // TODO: match?
+                            if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) = m.data()
                             {
-                                // TODO: Defensive program against if size > 1?
-                                if let Some(data_point) = gauge_data.data_points().next() {
-                                    sticky_cache_size = data_point.value();
-                                    break;
-                                }
-                            } else if m.name() == "sticky_cache_hit"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data()
-                            {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    total_sticky_cache_hit = data_point.value();
-                                    break;
-                                }
-                            } else if m.name() == "sticky_cache_miss"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data()
-                            {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    total_sticky_cache_miss = data_point.value();
-                                    break;
-                                }
-                            } else if m.name() == "num_pollers"
-                                && let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) =
-                                m.data()
-                            {
-                                // println!("gauge_data: {:#?}", gauge_data);
-                                for data_point in gauge_data.data_points() {
-                                    for attr in data_point.attributes() {
-                                        if attr.key.as_str() == "poller_type" {
-                                            match attr.value.as_str().as_ref() {
-                                                "workflow_task" => {
-                                                    wft_current_pollers = data_point.value()
+                                if m.name() == STICKY_CACHE_SIZE_NAME {
+                                    if let Some(data_point) = gauge_data.data_points().next() {
+                                        sticky_cache_size = data_point.value();
+                                        break; //TODO: why break?
+                                    }
+                                } else if m.name() == "num_pollers" {
+                                    for data_point in gauge_data.data_points() {
+                                        for attr in data_point.attributes() {
+                                            if attr.key.as_str() == "poller_type" {
+                                                match attr.value.as_str().as_ref() {
+                                                    "workflow_task" => {
+                                                        wft_current_pollers = data_point.value()
+                                                    }
+                                                    "sticky_workflow_task" => {
+                                                        sticky_wft_current_pollers =
+                                                            data_point.value()
+                                                    }
+                                                    "activity_task" => {
+                                                        activity_current_pollers =
+                                                            data_point.value()
+                                                    }
+                                                    "nexus_task" => {
+                                                        nexus_current_pollers = data_point.value()
+                                                    }
+                                                    _ => (),
                                                 }
-                                                "sticky_workflow_task" => {
-                                                    sticky_wft_current_pollers = data_point.value()
-                                                }
-                                                "activity_task" => {
-                                                    activity_current_pollers = data_point.value()
-                                                }
-                                                "nexus_task" => {
-                                                    nexus_current_pollers = data_point.value()
-                                                }
-                                                _ => (),
                                             }
                                         }
                                     }
                                 }
-                            } else if m.name() == "workflow_task_queue_poll_succeed"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data()
-                            {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    workflow_task_queue_poll_succeed = data_point.value();
-                                    break;
-                                }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-                            } else if m.name() == "workflow_task_execution_failed"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data()
-                            {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    workflow_task_execution_failed = data_point.value();
-                                    break;
-                                }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-                            } else if m.name() == "activity_task_received"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    activity_task_received = data_point.value();
-                                    break;
-                                }
-                                // TODO: might contain Local Activity data as well, need to print and see
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-
-                            }else if m.name() == "activity_execution_failed"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    activity_execution_failed = data_point.value();
-                                    break;
-                                }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-
-                            } else if m.name() == "activity_task_received"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    activity_task_received = data_point.value();
-                                    break;
-                                }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-
-                            }else if m.name() == "nexus_task_execution_failed"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    nexus_task_execution_failed = data_point.value();
-                                    break;
-                                }
-                                // TODO: nexus_task_Received might be put in with other metrics
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-
-                            } else if m.name() == "local_activity_execution_failed"
-                                && let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // TODO: Defensive program against if size > 1?
-                                for data_point in sum_data.data_points() {
-                                    local_activity_execution_failed = data_point.value();
-                                    break;
-                                }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {:#?}", m);
-
                             }
-
-
+                            if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
+                                if m.name() == "sticky_cache_hit" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        total_sticky_cache_hit = data_point.value();
+                                        break;
+                                    }
+                                } else if m.name() == "sticky_cache_miss" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        total_sticky_cache_miss = data_point.value();
+                                        break;
+                                    }
+                                } else if m.name() == "workflow_task_queue_poll_succeed" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        workflow_task_queue_poll_succeed = data_point.value();
+                                        break;
+                                    }
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "workflow_task_execution_failed" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        workflow_task_execution_failed = data_point.value();
+                                        break;
+                                    }
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "activity_task_received" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        activity_task_received = data_point.value();
+                                        break;
+                                    }
+                                    // TODO: might contain Local Activity data as well, need to print and see
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "activity_execution_failed" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        activity_execution_failed = data_point.value();
+                                        break;
+                                    }
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "activity_task_received" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        activity_task_received = data_point.value();
+                                        break;
+                                    }
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "nexus_task_execution_failed" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        nexus_task_execution_failed = data_point.value();
+                                        break;
+                                    }
+                                    // TODO: nexus_task_Received might be put in with other metrics
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                } else if m.name() == "local_activity_execution_failed" {
+                                    // TODO: Defensive program against if size > 1?
+                                    for data_point in sum_data.data_points() {
+                                        local_activity_execution_failed = data_point.value();
+                                        break;
+                                    }
+                                    println!("m.name {:?}", m.name());
+                                    println!("m: {:#?}", m);
+                                }
+                            }
                         }
                     }
                 }
             });
-
 
             let workflow_poller_info = Some(WorkerPollerInfo {
                 current_pollers: wft_current_pollers as i32,
@@ -362,8 +347,7 @@ impl WorkerHeartbeatManager {
 
             let workflow_sticky_poller_info = Some(WorkerPollerInfo {
                 current_pollers: sticky_wft_current_pollers as i32,
-                last_successful_poll_time: (*wf_sticky_last_suc_poll_time.lock())
-                    .map(Into::into),
+                last_successful_poll_time: (*wf_sticky_last_suc_poll_time.lock()).map(Into::into),
                 is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
             });
 
@@ -391,8 +375,10 @@ impl WorkerHeartbeatManager {
             );
 
             // TODO: total_process for both these
-            let nexus_task_slots_info = make_slots_info(&nexus_slots, 0, nexus_task_execution_failed);
-            let local_activity_slots_info = make_slots_info(&la_slots, 0, local_activity_execution_failed);
+            let nexus_task_slots_info =
+                make_slots_info(&nexus_slots, 0, nexus_task_execution_failed);
+            let local_activity_slots_info =
+                make_slots_info(&la_slots, 0, local_activity_execution_failed);
 
             WorkerHeartbeat {
                 worker_instance_key: worker_instance_key.to_string(),
@@ -434,7 +420,6 @@ impl WorkerHeartbeatManager {
         }
     }
 }
-
 
 #[async_trait::async_trait]
 impl WorkerTrait for Worker {
@@ -1310,11 +1295,11 @@ where
 {
     // TODO: If either is unknown, return None instead of panicking.
     let avail_usize = dealer.available_permits()?;
-    let max_usize   = dealer.max_permits()?;
+    let max_usize = dealer.max_permits()?;
 
     // TODO: safe to assume u32 to i32 would be fine? prob okay to use as
     let avail = i32::try_from(avail_usize).unwrap_or(i32::MAX);
-    let max   = i32::try_from(max_usize).unwrap_or(i32::MAX);
+    let max = i32::try_from(max_usize).unwrap_or(i32::MAX);
 
     let used = (max - avail).max(0);
 

@@ -157,38 +157,81 @@ struct HeartbeatSlotsInfo {
     local_activity_slots_info: SlotsInfo,
 }
 
-fn process_slot_info(worker_instance_key: Uuid, heartbeat: &mut WorkerHeartbeat, slots_map: &mut HashMap<Uuid, HeartbeatSlotsInfo>) {
-    let slots_info = slots_map.entry(worker_instance_key).or_insert_with(|| HeartbeatSlotsInfo::default());
+fn process_slot_info(
+    worker_instance_key: Uuid,
+    heartbeat: &mut WorkerHeartbeat,
+    slots_map: &mut HashMap<Uuid, HeartbeatSlotsInfo>,
+) {
+    let slots_info = slots_map
+        .entry(worker_instance_key)
+        .or_insert_with(|| HeartbeatSlotsInfo::default());
     if let Some(wft_slot_info) = heartbeat.workflow_task_slots_info.as_mut() {
-        wft_slot_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks - slots_info.workflow_task_slots_info.last_interval_processed_tasks;
-        wft_slot_info.last_interval_failure_tasks = wft_slot_info.total_failed_tasks - slots_info.workflow_task_slots_info.last_interval_failure_tasks;
+        wft_slot_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks
+            - slots_info
+                .workflow_task_slots_info
+                .last_interval_processed_tasks;
+        wft_slot_info.last_interval_failure_tasks = wft_slot_info.total_failed_tasks
+            - slots_info
+                .workflow_task_slots_info
+                .last_interval_failure_tasks;
 
-        slots_info.workflow_task_slots_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks;
-        slots_info.workflow_task_slots_info.last_interval_failure_tasks = wft_slot_info.total_failed_tasks;
+        slots_info
+            .workflow_task_slots_info
+            .last_interval_processed_tasks = wft_slot_info.total_processed_tasks;
+        slots_info
+            .workflow_task_slots_info
+            .last_interval_failure_tasks = wft_slot_info.total_failed_tasks;
     }
 
     if let Some(act_slot_info) = heartbeat.activity_task_slots_info.as_mut() {
-        act_slot_info.last_interval_processed_tasks = act_slot_info.total_processed_tasks - slots_info.activity_task_slots_info.last_interval_processed_tasks;
-        act_slot_info.last_interval_failure_tasks = act_slot_info.total_failed_tasks - slots_info.activity_task_slots_info.last_interval_failure_tasks;
+        act_slot_info.last_interval_processed_tasks = act_slot_info.total_processed_tasks
+            - slots_info
+                .activity_task_slots_info
+                .last_interval_processed_tasks;
+        act_slot_info.last_interval_failure_tasks = act_slot_info.total_failed_tasks
+            - slots_info
+                .activity_task_slots_info
+                .last_interval_failure_tasks;
 
-        slots_info.activity_task_slots_info.last_interval_processed_tasks = act_slot_info.total_processed_tasks;
-        slots_info.activity_task_slots_info.last_interval_failure_tasks = act_slot_info.total_failed_tasks;
+        slots_info
+            .activity_task_slots_info
+            .last_interval_processed_tasks = act_slot_info.total_processed_tasks;
+        slots_info
+            .activity_task_slots_info
+            .last_interval_failure_tasks = act_slot_info.total_failed_tasks;
     }
 
     if let Some(nexus_slot_info) = heartbeat.nexus_task_slots_info.as_mut() {
-        nexus_slot_info.last_interval_processed_tasks = nexus_slot_info.total_processed_tasks - slots_info.nexus_task_slots_info.last_interval_processed_tasks;
-        nexus_slot_info.last_interval_failure_tasks = nexus_slot_info.total_failed_tasks - slots_info.nexus_task_slots_info.last_interval_failure_tasks;
+        nexus_slot_info.last_interval_processed_tasks = nexus_slot_info.total_processed_tasks
+            - slots_info
+                .nexus_task_slots_info
+                .last_interval_processed_tasks;
+        nexus_slot_info.last_interval_failure_tasks = nexus_slot_info.total_failed_tasks
+            - slots_info.nexus_task_slots_info.last_interval_failure_tasks;
 
-        slots_info.nexus_task_slots_info.last_interval_processed_tasks = nexus_slot_info.total_processed_tasks;
-        slots_info.nexus_task_slots_info.last_interval_failure_tasks = nexus_slot_info.total_failed_tasks;
+        slots_info
+            .nexus_task_slots_info
+            .last_interval_processed_tasks = nexus_slot_info.total_processed_tasks;
+        slots_info.nexus_task_slots_info.last_interval_failure_tasks =
+            nexus_slot_info.total_failed_tasks;
     }
 
     if let Some(la_slot_info) = heartbeat.local_activity_slots_info.as_mut() {
-        la_slot_info.last_interval_processed_tasks = la_slot_info.total_processed_tasks - slots_info.local_activity_slots_info.last_interval_processed_tasks;
-        la_slot_info.last_interval_failure_tasks = la_slot_info.total_failed_tasks - slots_info.local_activity_slots_info.last_interval_failure_tasks;
+        la_slot_info.last_interval_processed_tasks = la_slot_info.total_processed_tasks
+            - slots_info
+                .local_activity_slots_info
+                .last_interval_processed_tasks;
+        la_slot_info.last_interval_failure_tasks = la_slot_info.total_failed_tasks
+            - slots_info
+                .local_activity_slots_info
+                .last_interval_failure_tasks;
 
-        slots_info.local_activity_slots_info.last_interval_processed_tasks = la_slot_info.total_processed_tasks;
-        slots_info.local_activity_slots_info.last_interval_failure_tasks = la_slot_info.total_failed_tasks;
+        slots_info
+            .local_activity_slots_info
+            .last_interval_processed_tasks = la_slot_info.total_processed_tasks;
+        slots_info
+            .local_activity_slots_info
+            .last_interval_failure_tasks = la_slot_info.total_failed_tasks;
     }
 }
 

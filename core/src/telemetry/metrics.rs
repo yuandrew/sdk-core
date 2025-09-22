@@ -7,7 +7,13 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use temporal_sdk_core_api::telemetry::metrics::{BufferAttributes, BufferInstrumentRef, CoreMeter, Counter, CounterBase, Gauge, GaugeBase, GaugeF64, GaugeF64Base, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase, HistogramF64, HistogramF64Base, LazyBufferInstrument, MetricAttributable, MetricAttributes, MetricCallBufferer, MetricEvent, MetricKeyValue, MetricKind, MetricParameters, MetricUpdateVal, NewAttributes, NoOpCoreMeter, TemporalMeter};
+use temporal_sdk_core_api::telemetry::metrics::{
+    BufferAttributes, BufferInstrumentRef, CoreMeter, Counter, CounterBase, Gauge, GaugeBase,
+    GaugeF64, GaugeF64Base, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase,
+    HistogramF64, HistogramF64Base, LazyBufferInstrument, MetricAttributable, MetricAttributes,
+    MetricCallBufferer, MetricEvent, MetricKeyValue, MetricKind, MetricParameters, MetricUpdateVal,
+    NewAttributes, NoOpCoreMeter, TemporalMeter,
+};
 use temporal_sdk_core_protos::temporal::api::{
     enums::v1::WorkflowTaskFailedCause, failure::v1::Failure,
 };
@@ -75,7 +81,12 @@ impl MetricsContext {
 
     #[cfg(test)]
     pub(crate) fn top_level(namespace: String, tq: String, telemetry: &TelemetryInstance) -> Self {
-        MetricsContext::top_level_with_meter(namespace, tq, telemetry.get_temporal_metric_meter(), telemetry.in_memory_meter())
+        MetricsContext::top_level_with_meter(
+            namespace,
+            tq,
+            telemetry.get_temporal_metric_meter(),
+            telemetry.in_memory_meter(),
+        )
     }
 
     pub(crate) fn top_level_with_meter(
