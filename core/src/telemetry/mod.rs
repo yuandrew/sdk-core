@@ -141,6 +141,7 @@ impl TelemetryInstance {
         }
     }
 
+    /// Returns an in memory meter, used to query metric state for worker heartbeating.
     pub fn in_memory_meter(&self) -> Option<Arc<InMemoryMeter>> {
         self.in_memory_meter.clone()
     }
@@ -320,6 +321,8 @@ where
     }
 }
 
+/// Adds in memory support for [CoreMeter] traits, used for worker heartbeating.
 pub trait CoreMeterWithMem: CoreMeter + Send + Sync + Debug {
+    /// Returns an in memory meter, used to query metric state for worker heartbeating.
     fn in_memory_meter(&self) -> Arc<InMemoryMeter>;
 }

@@ -30,7 +30,6 @@ mod core_tests;
 #[macro_use]
 pub mod test_help;
 
-use std::collections::HashMap;
 pub(crate) use temporal_sdk_core_api::errors;
 
 pub use pollers::{
@@ -48,13 +47,10 @@ pub use worker::{
     WorkerConfigBuilder,
 };
 
-use crate::abstractions::dbg_panic;
-use crate::worker::client::WorkerClientWithHeartbeat;
 /// Expose [WorkerClient] symbols
 pub use crate::worker::client::{
     PollActivityOptions, PollOptions, PollWorkflowOptions, WorkerClient, WorkflowTaskCompletion,
 };
-use crate::worker::heartbeat::{ClientIdentity, HeartbeatFn, SharedNamespaceWorker};
 use crate::{
     replay::{HistoryForReplay, ReplayWorkerInput},
     telemetry::{
@@ -67,9 +63,6 @@ use anyhow::bail;
 use futures_util::Stream;
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::Mutex;
-use std::sync::Arc;
-use std::time::Duration;
 use temporal_client::{ConfiguredClient, NamespacedClient, TemporalServiceClientWithMetrics};
 use temporal_sdk_core_api::{
     Worker as WorkerTrait,
@@ -77,7 +70,6 @@ use temporal_sdk_core_api::{
     telemetry::TelemetryOptions,
 };
 use temporal_sdk_core_protos::coresdk::ActivityHeartbeat;
-use uuid::Uuid;
 
 /// Initialize a worker bound to a task queue.
 ///
@@ -99,7 +91,6 @@ where
     CT: Into<sealed::AnyClient>,
 {
     let client_inner = *client.into().into_inner();
-    let endpoint = client_inner.options().clone().target_url;
     let client = init_worker_client(
         worker_config.namespace.clone(),
         worker_config.client_identity_override.clone(),
@@ -126,8 +117,6 @@ where
         client,
         namespace.clone(),
         client_ident.clone(),
-        namespace.clone(),
-        client_ident,
         worker_config.versioning_strategy.clone(),
     ));
 
@@ -136,6 +125,7 @@ where
         sticky_q,
         client_bag.clone(),
         Some(&runtime.telemetry),
+        in_memory_meter,
         runtime.heartbeat_interval,
         false,
     )
@@ -251,7 +241,7 @@ pub struct RuntimeOptions {
     telemetry_options: TelemetryOptions,
     /// Optional worker heartbeat interval - This configures the heartbeat setting of all
     /// workers created using this runtime.
-    #[builder(default = Some(Duration::from_secs(60)))]
+    #[builder(default = "Some(Duration::from_secs(60))")]
     heartbeat_interval: Option<Duration>,
 }
 
@@ -361,49 +351,6 @@ impl CoreRuntime {
     /// Return a mutable reference to the owned [TelemetryInstance]
     pub fn telemetry_mut(&mut self) -> &mut TelemetryInstance {
         &mut self.telemetry
-    }
-
-    fn register_heartbeat_callback(
-        &self,
-        worker_instance_key: String,
-        client_identity: ClientIdentity,
-        heartbeat_callback: HeartbeatFn,
-        client: Arc<dyn WorkerClientWithHeartbeat>,
-    ) -> Arc<dyn Fn() + Send + Sync> {
-        if let Some(ref heartbeat_interval) = self.heartbeat_interval {
-            let mut shared_namespace_map = self.shared_namespace_map.lock();
-            let worker = shared_namespace_map
-                .entry(client_identity.clone())
-                .or_insert_with(|| {
-                    let namespace_map = self.shared_namespace_map.clone();
-                    let client_identity_clone = client_identity.clone();
-                    let remove_namespace_worker_callback = Arc::new(move || {
-                        namespace_map.lock().remove(&client_identity_clone);
-                    });
-
-                    // The first client of a ClientIdentity is the client used for the
-                    // SharedNamespaceWorker, so we need that client's heartbeat_map to store
-                    // heartbeat callbacks
-                    let heartbeat_map = client.get_heartbeat_map();
-
-                    SharedNamespaceWorker::new(
-                        client,
-                        client_identity,
-                        *heartbeat_interval,
-                        Some(&self.telemetry),
-                        remove_namespace_worker_callback,
-                        heartbeat_map,
-                    )
-                });
-            worker.register_callback(worker_instance_key, heartbeat_callback)
-        } else {
-            dbg_panic!("Worker heartbeat disabled for this runtime");
-            Arc::new(|| {})
-        }
-    }
-
-    fn task_queue_key(&self) -> Uuid {
-        self.task_queue_key
     }
 }
 

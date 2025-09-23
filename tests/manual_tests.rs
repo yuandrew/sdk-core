@@ -21,7 +21,7 @@ use std::{
 };
 use temporal_client::{GetWorkflowResultOpts, WfClientExt, WorkflowClientTrait, WorkflowOptions};
 use temporal_sdk::{ActContext, ActivityOptions, WfContext};
-use temporal_sdk_core::{CoreRuntime, RuntimeOptionsBuilder};
+use temporal_sdk_core::CoreRuntime;
 use temporal_sdk_core_api::{telemetry::PrometheusExporterOptionsBuilder, worker::PollerBehavior};
 use temporal_sdk_core_protos::coresdk::AsJsonPayloadExt;
 use tracing::info;

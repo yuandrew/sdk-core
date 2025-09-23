@@ -14,14 +14,10 @@ use std::{
 };
 use temporal_client::WorkflowOptions;
 use temporal_sdk::{ActivityOptions, WfContext, interceptors::WorkerInterceptor};
-use temporal_sdk_core::{
-    CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, RuntimeOptionsBuilder, init_worker,
-    test_help::{
-        FakeWfResponses, MockPollCfg, ResponseType, build_mock_pollers, drain_pollers_and_shutdown,
-        hist_to_poll_resp, mock_worker, mock_worker_client,
-    },
+use temporal_sdk_core::test_help::{
+    FakeWfResponses, MockPollCfg, ResponseType, build_mock_pollers, drain_pollers_and_shutdown,
+    hist_to_poll_resp, mock_worker, mock_worker_client,
 };
-use temporal_sdk::{WfContext, interceptors::WorkerInterceptor};
 use temporal_sdk_core::{
     CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, RuntimeOptionsBuilder, init_worker,
 };

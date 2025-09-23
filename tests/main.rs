@@ -32,7 +32,7 @@ mod integ_tests {
     };
     use std::time::Duration;
     use temporal_client::{NamespacedClient, WorkflowService};
-    use temporal_sdk_core::{CoreRuntime, RuntimeOptionsBuilder, init_worker};
+    use temporal_sdk_core::{CoreRuntime, init_worker};
     use temporal_sdk_core_api::worker::WorkerConfigBuilder;
     use temporal_sdk_core_protos::temporal::api::{
         nexus::v1::{EndpointSpec, EndpointTarget, endpoint_target},

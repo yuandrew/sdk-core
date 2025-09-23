@@ -7,7 +7,7 @@ use common::CoreWfStarter;
 use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
 use temporal_sdk_core::{
-    CoreRuntime, RuntimeOptionsBuilder,
+    CoreRuntime,
     telemetry::{build_otlp_metric_exporter, construct_filter_string, telemetry_init_global},
 };
 use temporal_sdk_core_api::telemetry::{

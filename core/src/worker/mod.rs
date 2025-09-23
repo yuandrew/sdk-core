@@ -20,10 +20,9 @@ pub(crate) use activities::{
 pub(crate) use wft_poller::WFTPollerShared;
 pub use workflow::LEGACY_QUERY_ID;
 
-use crate::worker::heartbeat::{HeartbeatFn, SharedNamespaceWorker};
 use crate::telemetry::InMemoryMeter;
 use crate::telemetry::metrics::STICKY_CACHE_SIZE_NAME;
-use crate::worker::heartbeat::HeartbeatFn;
+use crate::worker::heartbeat::{HeartbeatFn, SharedNamespaceWorker};
 use crate::{
     ActivityHeartbeat, CompleteActivityError, PollError, WorkerTrait,
     abstractions::{MeteredPermitDealer, PermitDealerContextData, dbg_panic},
@@ -55,11 +54,6 @@ use anyhow::bail;
 use futures_util::{StreamExt, stream};
 use gethostname::gethostname;
 use parking_lot::{Mutex, RwLock};
-use gethostname::gethostname;
-use itertools::Itertools;
-use opentelemetry::Value;
-use opentelemetry::metrics::Meter;
-use parking_lot::{Mutex, RwLock};
 use slot_provider::SlotProvider;
 use std::time::SystemTime;
 use std::{
@@ -80,7 +74,6 @@ use temporal_sdk_core_api::{
     errors::{CompleteNexusError, WorkerValidationError},
     worker::PollerBehavior,
 };
-use temporal_sdk_core_protos::temporal::api::worker::v1::{WorkerHeartbeat, WorkerHostInfo};
 use temporal_sdk_core_protos::temporal::api::worker::v1::{
     WorkerHeartbeat, WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo,
 };
@@ -99,10 +92,9 @@ use temporal_sdk_core_protos::{
         taskqueue::v1::{StickyExecutionAttributes, TaskQueue},
     },
 };
-use tokio::sync::{OnceCell, mpsc::unbounded_channel, watch};
+use tokio::sync::{mpsc::unbounded_channel, watch};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::Subscriber;
 use uuid::Uuid;
 #[cfg(any(feature = "test-utilities", test))]
 use {
@@ -115,12 +107,10 @@ use {
         PollActivityTaskQueueResponse, PollNexusTaskQueueResponse,
     },
 };
-// use opentelemetry_sdk::metrics::data::{Aggregation, Gauge, Sum};
-use opentelemetry_sdk::metrics::Aggregation;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, GaugeDataPoint, MetricData};
-use temporal_sdk_core_api::telemetry::metrics::TemporalMeter;
+use sysinfo::{System};
 use temporal_sdk_core_api::worker::{
-    ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind, WorkerDeploymentVersion,
+    ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind,
     WorkflowSlotKind,
 };
 use temporal_sdk_core_protos::temporal::api::deployment;
@@ -140,8 +130,6 @@ pub struct Worker {
     local_act_mgr: Arc<LocalActivityManager>,
     /// Manages Nexus tasks
     nexus_mgr: NexusManager,
-    /// Manages worker heartbeat. Will be None for [crate::SharedNamespaceWorker] workers
-    worker_heartbeat: Option<WorkerHeartbeat>,
     /// Has shutdown been called?
     shutdown_token: CancellationToken,
     /// Will be called at the end of each activation completion
@@ -205,20 +193,17 @@ impl WorkerHeartbeatManager {
         act_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
         nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
     ) -> Self {
-        let worker_identity = client.get_identity();
-        let worker_instance_key_clone = worker_instance_key.to_string();
+        let worker_identity = client.identity();
         let task_queue = config.task_queue.clone();
-        let sdk_name_and_ver = client.sdk_name_and_version();
         let deployment_version = config.computed_deployment_version();
         let deployment_version =
             deployment_version.map(|dv| deployment::v1::WorkerDeploymentVersion {
                 deployment_name: dv.deployment_name,
                 build_id: dv.build_id,
             });
-        let config_clone = config.clone();
 
         let worker_heartbeat_callback: HeartbeatFn = Box::new(move || {
-        let mut sticky_cache_size = 0;
+            let mut sticky_cache_size = 0;
             let mut total_sticky_cache_hit = 0;
             let mut total_sticky_cache_miss = 0;
             let mut wft_current_pollers = 0;
@@ -232,15 +217,12 @@ impl WorkerHeartbeatManager {
             let mut nexus_task_execution_failed = 0;
             let mut local_activity_execution_failed = 0;
 
-            in_memory_meter.clone().map(|in_mem_meter| {
-                let metrics = in_mem_meter.get_metrics().unwrap(); // TODO: unwrap
-                // println!("metrics {:?}", metrics.len());
+            if let Some(in_mem_meter) = in_memory_meter.clone()
+                && let Ok(metrics) = in_mem_meter.get_metrics()
+            {
                 for metric in metrics {
-                    // println!("\tmetric {:?}", metric);
                     for sm in metric.scope_metrics() {
-                        // println!("\t\tscope {:?}", sm.scope());
                         for m in sm.metrics() {
-                            // TODO: match?
                             if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) = m.data()
                             {
                                 if m.name() == STICKY_CACHE_SIZE_NAME {
@@ -275,82 +257,47 @@ impl WorkerHeartbeatManager {
                                 }
                             }
                             if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                if m.name() == "sticky_cache_hit" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        total_sticky_cache_hit = data_point.value();
-                                        break;
+                                // let v: Vec<_> =
+                                //     sum_data.data_points().map(|dp| dp.value()).collect();
+                                // println!("sum_data_len {:?}", v.len());
+                                // TODO: is there ever a scenario where len > 1? From printing, I don't see it
+                                //  but maybe in a more complex scenario than my test is running?
+                                if let Some(data_point) = sum_data.data_points().next() {
+                                    match m.name() {
+                                        "sticky_cache_hit" => {
+                                            total_sticky_cache_hit = data_point.value()
+                                        }
+                                        "sticky_cache_miss" => {
+                                            total_sticky_cache_miss = data_point.value()
+                                        }
+                                        "workflow_task_queue_poll_succeed" => {
+                                            workflow_task_queue_poll_succeed = data_point.value()
+                                        }
+                                        "workflow_task_execution_failed" => {
+                                            workflow_task_execution_failed = data_point.value()
+                                        }
+                                        "activity_task_received" => {
+                                            activity_task_received = data_point.value()
+                                        }
+                                        "activity_execution_failed" => {
+                                            activity_execution_failed = data_point.value()
+                                        }
+                                        "nexus_task_execution_failed" => {
+                                            nexus_task_execution_failed = data_point.value()
+                                        }
+                                        "local_activity_execution_failed" => {
+                                            local_activity_execution_failed = data_point.value()
+                                        }
+                                        _ => println!("TODO: Unrecognized m.name {:?}", m.name()),
                                     }
-                                } else if m.name() == "sticky_cache_miss" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        total_sticky_cache_miss = data_point.value();
-                                        break;
-                                    }
-                                } else if m.name() == "workflow_task_queue_poll_succeed" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        workflow_task_queue_poll_succeed = data_point.value();
-                                        break;
-                                    }
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "workflow_task_execution_failed" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        workflow_task_execution_failed = data_point.value();
-                                        break;
-                                    }
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "activity_task_received" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        activity_task_received = data_point.value();
-                                        break;
-                                    }
-                                    // TODO: might contain Local Activity data as well, need to print and see
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "activity_execution_failed" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        activity_execution_failed = data_point.value();
-                                        break;
-                                    }
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "activity_task_received" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        activity_task_received = data_point.value();
-                                        break;
-                                    }
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "nexus_task_execution_failed" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        nexus_task_execution_failed = data_point.value();
-                                        break;
-                                    }
-                                    // TODO: nexus_task_Received might be put in with other metrics
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
-                                } else if m.name() == "local_activity_execution_failed" {
-                                    // TODO: Defensive program against if size > 1?
-                                    for data_point in sum_data.data_points() {
-                                        local_activity_execution_failed = data_point.value();
-                                        break;
-                                    }
-                                    println!("m.name {:?}", m.name());
-                                    println!("m: {:#?}", m);
                                 }
+                                println!("m.name {:?}", m.name());
+                                println!("m: {m:#?}");
                             }
                         }
                     }
                 }
-            });
+            }
 
             let workflow_poller_info = Some(WorkerPollerInfo {
                 current_pollers: wft_current_pollers as i32,
@@ -393,19 +340,31 @@ impl WorkerHeartbeatManager {
             let local_activity_slots_info =
                 make_slots_info(&la_slots, 0, local_activity_execution_failed);
 
+            let mut sys = System::new_all();
+            sys.refresh_all();
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            sys.refresh_cpu_usage();
+            let current_host_cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+            let total_mem = sys.total_memory() as f64;
+            let used_mem = sys.used_memory() as f64;
+            let current_host_mem_usage = (used_mem / total_mem) as f32;
+
+
             WorkerHeartbeat {
                 worker_instance_key: worker_instance_key.to_string(),
                 worker_identity: worker_identity.clone(),
                 host_info: Some(WorkerHostInfo {
                     host_name: gethostname().to_string_lossy().to_string(),
                     process_id: std::process::id().to_string(),
-                    ..Default::default()
+                    process_key: client.worker_set_key().to_string(),
+                    current_host_cpu_usage,
+                    current_host_mem_usage,
                 }),
                 task_queue: task_queue.clone(),
                 deployment_version: deployment_version.clone(),
 
                 status: 0, // TODO
-                start_time: Some(std::time::SystemTime::now().into()),
+                start_time: Some(SystemTime::now().into()),
                 workflow_task_slots_info,
                 activity_task_slots_info,
                 nexus_task_slots_info,
@@ -424,9 +383,8 @@ impl WorkerHeartbeatManager {
                 // need to be pulled from the current client used by SharedNamespaceWorker
                 heartbeat_time: None,
                 elapsed_since_last_heartbeat: None,
-                sdk_name: 0,
-                sdk_version: 0,
-
+                sdk_name: String::new(),
+                sdk_version: String::new(),
             }
         });
 
@@ -633,7 +591,7 @@ impl Worker {
 
     #[cfg(test)]
     pub(crate) fn new_test(config: WorkerConfig, client: impl WorkerClient + 'static) -> Self {
-        Self::new(config, None, Arc::new(client), None, None, false).unwrap()
+        Self::new(config, None, Arc::new(client), None, None, None, false).unwrap()
     }
 
     pub(crate) fn new_with_pollers(
@@ -885,7 +843,7 @@ impl Worker {
                 hb_interval,
                 worker_telemetry.clone(),
                 in_memory_meter,
-                wft_slots,
+                wft_slots.clone(),
                 act_slots,
                 nexus_slots,
                 la_permit_dealer,
@@ -1265,31 +1223,6 @@ impl Worker {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn get_heartbeat_callback(&self) -> Option<HeartbeatFn> {
-        if let Some(worker_heartbeat) = self.worker_heartbeat.as_ref() {
-            Some(worker_heartbeat.callback.clone())
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn worker_instance_key(&self) -> Option<String> {
-        self.worker_heartbeat
-            .as_ref()
-            .map(|worker_heartbeat| worker_heartbeat.worker_instance_key.clone())
-    }
-
-    pub(crate) fn register_heartbeat_shutdown_callback(
-        &mut self,
-        callback: Arc<dyn Fn() + Send + Sync>,
-    ) {
-        if let Some(worker_heartbeat) = self.worker_heartbeat.as_mut()
-            && let Err(e) = worker_heartbeat.shutdown_callback.set(callback)
-        {
-            dbg_panic!("Unable to set worker heartbeat shutdown callback: {}", e);
-        }
     }
 }
 

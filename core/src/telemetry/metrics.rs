@@ -19,7 +19,6 @@ use temporal_sdk_core_api::telemetry::metrics::{
 use temporal_sdk_core_protos::temporal::api::{
     enums::v1::WorkflowTaskFailedCause, failure::v1::Failure,
 };
-use tokio::time::Instant;
 
 /// Used to track context associated with metrics, and record/update them
 #[derive(Clone)]

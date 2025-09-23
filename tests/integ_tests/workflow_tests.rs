@@ -40,7 +40,6 @@ use temporal_sdk_core::{
     replay::HistoryForReplay,
     test_help::{MockPollCfg, WorkerTestHelpers, drain_pollers_and_shutdown},
 };
-use temporal_sdk_core::{CoreRuntime, RuntimeOptionsBuilder, replay::HistoryForReplay};
 use temporal_sdk_core_api::{
     errors::{PollError, WorkflowErrorType},
     worker::{

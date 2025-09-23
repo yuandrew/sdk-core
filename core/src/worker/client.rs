@@ -2,10 +2,7 @@
 
 pub(crate) mod mocks;
 use crate::protosext::legacy_query_failure;
-use parking_lot::RwLock;
-use crate::worker::heartbeat::HeartbeatFn;
-use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use parking_lot::{ RwLock};
 use std::{sync::Arc, time::Duration};
 use temporal_client::{
     Client, ClientWorkerSet, IsWorkerTaskLongPoll, Namespace, NamespacedClient, NoRetryOnMatching,
@@ -126,10 +123,6 @@ impl WorkerClientBag {
         }
     }
 }
-
-pub(crate) trait WorkerClientWithHeartbeat: WorkerClient + WorkerHeartbeatTrait {}
-
-impl<T: WorkerClient + WorkerHeartbeatTrait> WorkerClientWithHeartbeat for T {}
 
 /// This trait contains everything workers need to interact with Temporal, and hence provides a
 /// minimal mocking surface. Delegates to [WorkflowClientTrait] so see that for details.
@@ -353,12 +346,6 @@ impl WorkerClient for WorkerClientBag {
         poll_options: PollOptions,
         _send_heartbeat: bool,
     ) -> Result<PollNexusTaskQueueResponse> {
-        let worker_heartbeat = if send_heartbeat {
-            self.capture_heartbeat()
-        } else {
-            Vec::new()
-        };
-
         #[allow(deprecated)] // want to list all fields explicitly
         let mut request = PollNexusTaskQueueRequest {
             namespace: self.namespace.clone(),
@@ -679,6 +666,7 @@ impl WorkerClient for WorkerClientBag {
             identity: self.identity.clone(),
             worker_heartbeat,
         };
+        println!("record_worker_heartbeat {:#?}", request);
         Ok(self
             .cloned_client()
             .record_worker_heartbeat(request)

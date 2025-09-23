@@ -20,9 +20,7 @@ use std::{
 };
 use temporal_client::{GetWorkflowResultOpts, WfClientExt, WorkflowClientTrait, WorkflowOptions};
 use temporal_sdk::{ActContext, ActivityOptions, WfContext, WorkflowResult};
-use temporal_sdk_core::{
-    CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, RuntimeOptionsBuilder,
-};
+use temporal_sdk_core::{CoreRuntime, ResourceBasedTuner, ResourceSlotOptions};
 use temporal_sdk_core_api::worker::PollerBehavior;
 use temporal_sdk_core_protos::{
     coresdk::{AsJsonPayloadExt, workflow_commands::ActivityCancellationType},

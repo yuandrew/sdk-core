@@ -29,7 +29,6 @@ use temporal_sdk_core_protos::temporal::api::{
         PollActivityTaskQueueResponse, PollNexusTaskQueueResponse, PollWorkflowTaskQueueResponse,
     },
 };
-use tokio::time::Instant;
 use tokio::{
     sync::{
         Mutex, broadcast,

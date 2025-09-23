@@ -42,9 +42,6 @@ use temporal_sdk_core::{
     ClientOptions, ClientOptionsBuilder, CoreRuntime, RuntimeOptions, RuntimeOptionsBuilder,
     WorkerConfigBuilder, init_replay_worker, init_worker,
     replay::{HistoryForReplay, ReplayWorkerInput},
-    ClientOptions, ClientOptionsBuilder, CoreRuntime, RuntimeOptionsBuilder, WorkerConfigBuilder,
-    init_replay_worker, init_worker,
-    replay::ReplayWorkerInput,
     telemetry::{build_otlp_metric_exporter, start_prometheus_metric_exporter},
 };
 use temporal_sdk_core_api::{

@@ -12,6 +12,7 @@ use temporal_sdk_core_api::telemetry::metrics::{
     MetricParameters, NewAttributes,
 };
 
+/// In memory representation of metrics
 #[derive(Debug, Clone)]
 pub struct InMemoryMeter {
     pub(crate) meter: Meter,

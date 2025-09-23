@@ -1,23 +1,14 @@
 use crate::WorkerClient;
 use crate::worker::{TaskPollers, WorkerTelemetry};
-use crate::abstractions::dbg_panic;
-use crate::telemetry::{InMemoryMeter, TelemetryInstance};
 use parking_lot::Mutex;
 use prost_types::Duration as PbDuration;
 use std::collections::HashMap;
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use temporal_client::SharedNamespaceWorkerTrait;
 use temporal_sdk_core_api::worker::{
     PollerBehavior, WorkerConfigBuilder, WorkerVersioningStrategy,
 };
-use temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
-use temporal_sdk_core_api::worker::{WorkerConfigBuilder, WorkerVersioningStrategy};
 use temporal_sdk_core_protos::temporal::api::worker::v1::WorkerHeartbeat;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -63,10 +54,9 @@ impl SharedNamespaceWorker {
             TaskPollers::Real,
             telemetry,
             None,
+            None,
             true,
         )?;
-
-        let last_heartbeat_time_map = Mutex::new(HashMap::new());
 
         let reset_notify = Arc::new(Notify::new());
         let cancel = CancellationToken::new();
@@ -117,7 +107,7 @@ impl SharedNamespaceWorker {
 
                             hb_to_send.push(heartbeat);
 
-                            last_heartbeat_time_map.insert(*instance_key, now);
+                            last_heartbeat_time.insert(*instance_key, now);
                         }
                         if let Err(e) = client_clone.record_worker_heartbeat(namespace_clone.clone(), hb_to_send).await {
                             if matches!(e.code(), tonic::Code::Unimplemented) {
@@ -330,6 +320,7 @@ mod tests {
             config,
             None,
             client.clone(),
+            None,
             None,
             Some(Duration::from_millis(100)),
             false,

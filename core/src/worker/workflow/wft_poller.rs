@@ -13,7 +13,6 @@ use std::time::SystemTime;
 use temporal_sdk_core_api::worker::{WorkerConfig, WorkflowSlotKind};
 use temporal_sdk_core_protos::temporal::api::workflowservice::v1::PollWorkflowTaskQueueResponse;
 use tokio::sync::watch;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn make_wft_poller(
