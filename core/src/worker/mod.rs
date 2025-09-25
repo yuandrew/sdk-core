@@ -169,247 +169,6 @@ pub(crate) struct WorkerTelemetry {
     in_memory_meter: Option<Arc<InMemoryMeter>>,
 }
 
-struct WorkerHeartbeatManager {
-    /// Heartbeat interval, defaults to 60s
-    heartbeat_interval: Duration,
-    /// Telemetry instance, needed to initialize [SharedNamespaceWorker] when replacing client
-    telemetry: Option<WorkerTelemetry>,
-    /// Heartbeat callback
-    heartbeat_callback: Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>,
-}
-
-impl WorkerHeartbeatManager {
-    fn new(
-        config: WorkerConfig,
-        worker_instance_key: Uuid,
-        heartbeat_interval: Duration,
-        telemetry_instance: Option<WorkerTelemetry>,
-        in_memory_meter: Option<Arc<InMemoryMeter>>,
-        wft_slots: MeteredPermitDealer<WorkflowSlotKind>,
-        act_slots: MeteredPermitDealer<ActivitySlotKind>,
-        nexus_slots: MeteredPermitDealer<NexusSlotKind>,
-        la_slots: MeteredPermitDealer<LocalActivitySlotKind>,
-        wf_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
-        wf_sticky_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
-        act_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
-        nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
-        status: Arc<Mutex<WorkerStatus>>,
-    ) -> Self {
-        let task_queue = config.task_queue.clone();
-        let deployment_version = config.computed_deployment_version();
-        let deployment_version =
-            deployment_version.map(|dv| deployment::v1::WorkerDeploymentVersion {
-                deployment_name: dv.deployment_name,
-                build_id: dv.build_id,
-            });
-
-        let worker_heartbeat_callback: HeartbeatFn = Arc::new(move || {
-            let mut sticky_cache_size = 0;
-            let mut total_sticky_cache_hit = 0;
-            let mut total_sticky_cache_miss = 0;
-            let mut wft_current_pollers = 0;
-            let mut sticky_wft_current_pollers = 0;
-            let mut activity_current_pollers = 0;
-            let mut nexus_current_pollers = 0;
-            let mut workflow_task_execution_failed = 0;
-            let mut activity_execution_failed = 0;
-            let mut nexus_task_execution_failed = 0;
-            let mut local_activity_execution_failed = 0;
-            let mut activity_execution_latency = 0;
-            let mut local_activity_execution_latency = 0;
-            let mut workflow_task_execution_latency = 0;
-            let mut nexus_task_execution_latency = 0;
-
-            if let Some(in_mem_meter) = in_memory_meter.clone()
-                && let Ok(metrics) = in_mem_meter.get_metrics()
-            {
-                for metric in metrics {
-                    for sm in metric.scope_metrics() {
-                        for m in sm.metrics() {
-                            if let AggregatedMetrics::F64(MetricData::Histogram(histogram_data)) = m.data() {
-                                // println!("m.name {:?}", m.name());
-                                if let Some(data_point) = histogram_data.data_points().next() {
-                                    match m.name() {
-                                        "activity_execution_latency" => {
-                                            activity_execution_latency = data_point.count();
-                                        }
-                                        "local_activity_execution_latency" => {
-                                            local_activity_execution_latency = data_point.count();
-                                        }
-                                        "workflow_task_execution_latency" => {
-                                            workflow_task_execution_latency = data_point.count();
-                                        }
-                                        "nexus_task_execution_latency" => {
-                                            nexus_task_execution_latency = data_point.count();
-                                        }
-                                        _ => (),
-                                    }
-                                    if m.name() == "activity_execution_latency" {
-                                        activity_execution_latency = data_point.count();
-                                    } else if m.name() == "local_activity_execution_latency" {
-                                        local_activity_execution_latency = data_point.count();
-                                    }
-                                }
-                            } else if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) = m.data()
-                            {
-                                if m.name() == STICKY_CACHE_SIZE_NAME && let Some(data_point) = gauge_data.data_points().next() {
-                                    sticky_cache_size = data_point.value();
-                                } else if m.name() == "num_pollers" {
-                                    for data_point in gauge_data.data_points() {
-                                        for attr in data_point.attributes() {
-                                            if attr.key.as_str() == "poller_type" {
-                                                match attr.value.as_str().as_ref() {
-                                                    "workflow_task" => {
-                                                        wft_current_pollers = data_point.value()
-                                                    }
-                                                    "sticky_workflow_task" => {
-                                                        sticky_wft_current_pollers =
-                                                            data_point.value()
-                                                    }
-                                                    "activity_task" => {
-                                                        activity_current_pollers =
-                                                            data_point.value()
-                                                    }
-                                                    "nexus_task" => {
-                                                        nexus_current_pollers = data_point.value()
-                                                    }
-                                                    _ => (),
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }  else if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                if let Some(data_point) = sum_data.data_points().next() {
-                                    match m.name() {
-                                        "sticky_cache_hit" => {
-                                            total_sticky_cache_hit = data_point.value()
-                                        }
-                                        "sticky_cache_miss" => {
-                                            total_sticky_cache_miss = data_point.value()
-                                        }
-                                        "workflow_task_execution_failed" => {
-                                            workflow_task_execution_failed = data_point.value()
-                                        }
-                                        "activity_execution_failed" => {
-                                            activity_execution_failed = data_point.value()
-                                        }
-                                        "nexus_task_execution_failed" => {
-                                            nexus_task_execution_failed = data_point.value()
-                                        }
-                                        "local_activity_execution_failed" => {
-                                            local_activity_execution_failed = data_point.value()
-                                        }
-                                        _ => (),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            let workflow_poller_info = Some(WorkerPollerInfo {
-                current_pollers: wft_current_pollers as i32,
-                last_successful_poll_time: (*wf_last_suc_poll_time.lock()).map(Into::into),
-                is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
-            });
-
-            let workflow_sticky_poller_info = Some(WorkerPollerInfo {
-                current_pollers: sticky_wft_current_pollers as i32,
-                last_successful_poll_time: (*wf_sticky_last_suc_poll_time.lock()).map(Into::into),
-                is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
-            });
-
-            let activity_poller_info = Some(WorkerPollerInfo {
-                current_pollers: activity_current_pollers as i32,
-                last_successful_poll_time: (*act_last_suc_poll_time.lock()).map(Into::into),
-                is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
-            });
-
-            let nexus_poller_info = Some(WorkerPollerInfo {
-                current_pollers: nexus_current_pollers as i32,
-                last_successful_poll_time: (*nexus_last_suc_poll_time.lock()).map(Into::into),
-                is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
-            });
-
-            let workflow_task_slots_info = make_slots_info(
-                &wft_slots,
-                workflow_task_execution_latency,
-                workflow_task_execution_failed,
-            );
-            let activity_task_slots_info = make_slots_info(
-                &act_slots,
-                activity_execution_latency,
-                activity_execution_failed,
-            );
-
-            let nexus_task_slots_info =
-                make_slots_info(&nexus_slots, nexus_task_execution_latency, nexus_task_execution_failed);
-            let local_activity_slots_info = make_slots_info(
-                &la_slots,
-                local_activity_execution_latency,
-                local_activity_execution_failed,
-            );
-
-            let mut sys = System::new_all();
-            sys.refresh_all();
-            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-            sys.refresh_cpu_usage();
-            let current_host_cpu_usage: f32 =
-                sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
-            let total_mem = sys.total_memory() as f64;
-            let used_mem = sys.used_memory() as f64;
-            let current_host_mem_usage = (used_mem / total_mem) as f32;
-
-            WorkerHeartbeat {
-                worker_instance_key: worker_instance_key.to_string(),
-                host_info: Some(WorkerHostInfo {
-                    host_name: gethostname().to_string_lossy().to_string(),
-                    process_id: std::process::id().to_string(),
-                    current_host_cpu_usage,
-                    current_host_mem_usage,
-
-                    // Set by SharedNamespaceWorker because it relies on the client
-                    process_key: String::new(),
-                }),
-                task_queue: task_queue.clone(),
-                deployment_version: deployment_version.clone(),
-
-                status: (*status.lock()).try_into().unwrap_or_default(),
-                start_time: Some(SystemTime::now().into()),
-                workflow_task_slots_info,
-                activity_task_slots_info,
-                nexus_task_slots_info,
-                local_activity_slots_info,
-                workflow_poller_info,
-                workflow_sticky_poller_info,
-                activity_poller_info,
-                nexus_poller_info,
-                total_sticky_cache_hit: total_sticky_cache_hit as i32,
-                total_sticky_cache_miss: total_sticky_cache_miss as i32,
-                current_sticky_cache_size: sticky_cache_size as i32,
-                plugins: config.plugins.clone(),
-
-                // sdk_name, sdk_version, and worker_identity must be set by
-                // SharedNamespaceWorker because they rely on the client, and
-                // need to be pulled from the current client used by SharedNamespaceWorker
-                worker_identity: String::new(),
-                heartbeat_time: None,
-                elapsed_since_last_heartbeat: None,
-                sdk_name: String::new(),
-                sdk_version: String::new(),
-            }
-        });
-
-        WorkerHeartbeatManager {
-            heartbeat_interval,
-            telemetry: telemetry_instance,
-            heartbeat_callback: worker_heartbeat_callback,
-        }
-    }
-}
-
 #[async_trait::async_trait]
 impl WorkerTrait for Worker {
     async fn validate(&self) -> Result<(), WorkerValidationError> {
@@ -1251,13 +1010,6 @@ impl Worker {
     }
 }
 
-fn is_wft<T>(dp: &GaugeDataPoint<T>) -> bool {
-    dp.attributes().any(|kv| {
-        kv.key.as_str() == "poller_type"
-        // && matches!(&kv.value, Value::String(s) if s.as_ref() == "workflow_task")
-    })
-}
-
 struct ClientWorkerRegistrator {
     worker_instance_key: Uuid,
     slot_provider: SlotProvider,
@@ -1304,6 +1056,257 @@ impl ClientWorker for ClientWorkerRegistrator {
             )?))
         } else {
             bail!("Shared namespace worker creation never be called without a heartbeat manager");
+        }
+    }
+}
+
+struct WorkerHeartbeatManager {
+    /// Heartbeat interval, defaults to 60s
+    heartbeat_interval: Duration,
+    /// Telemetry instance, needed to initialize [SharedNamespaceWorker] when replacing client
+    telemetry: Option<WorkerTelemetry>,
+    /// Heartbeat callback
+    heartbeat_callback: Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>,
+}
+
+impl WorkerHeartbeatManager {
+    fn new(
+        config: WorkerConfig,
+        worker_instance_key: Uuid,
+        heartbeat_interval: Duration,
+        telemetry_instance: Option<WorkerTelemetry>,
+        in_memory_meter: Option<Arc<InMemoryMeter>>,
+        wft_slots: MeteredPermitDealer<WorkflowSlotKind>,
+        act_slots: MeteredPermitDealer<ActivitySlotKind>,
+        nexus_slots: MeteredPermitDealer<NexusSlotKind>,
+        la_slots: MeteredPermitDealer<LocalActivitySlotKind>,
+        wf_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        wf_sticky_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        act_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        status: Arc<Mutex<WorkerStatus>>,
+    ) -> Self {
+        let task_queue = config.task_queue.clone();
+        let deployment_version = config.computed_deployment_version();
+        let deployment_version =
+            deployment_version.map(|dv| deployment::v1::WorkerDeploymentVersion {
+                deployment_name: dv.deployment_name,
+                build_id: dv.build_id,
+            });
+
+        let worker_heartbeat_callback: HeartbeatFn = Arc::new(move || {
+            let mut sticky_cache_size = 0;
+            let mut total_sticky_cache_hit = 0;
+            let mut total_sticky_cache_miss = 0;
+            let mut wft_current_pollers = 0;
+            let mut sticky_wft_current_pollers = 0;
+            let mut activity_current_pollers = 0;
+            let mut nexus_current_pollers = 0;
+            let mut workflow_task_execution_failed = 0;
+            let mut activity_execution_failed = 0;
+            let mut nexus_task_execution_failed = 0;
+            let mut local_activity_execution_failed = 0;
+            let mut activity_execution_latency = 0;
+            let mut local_activity_execution_latency = 0;
+            let mut workflow_task_execution_latency = 0;
+            let mut nexus_task_execution_latency = 0;
+
+            if let Some(in_mem_meter) = in_memory_meter.clone()
+                && let Ok(metrics) = in_mem_meter.get_metrics()
+            {
+                for metric in metrics {
+                    for sm in metric.scope_metrics() {
+                        for m in sm.metrics() {
+                            if let AggregatedMetrics::F64(MetricData::Histogram(histogram_data)) =
+                                m.data()
+                            {
+                                // println!("m.name {:?}", m.name());
+                                if let Some(data_point) = histogram_data.data_points().next() {
+                                    match m.name() {
+                                        "activity_execution_latency" => {
+                                            activity_execution_latency = data_point.count();
+                                        }
+                                        "local_activity_execution_latency" => {
+                                            local_activity_execution_latency = data_point.count();
+                                        }
+                                        "workflow_task_execution_latency" => {
+                                            workflow_task_execution_latency = data_point.count();
+                                        }
+                                        "nexus_task_execution_latency" => {
+                                            nexus_task_execution_latency = data_point.count();
+                                        }
+                                        _ => (),
+                                    }
+                                    if m.name() == "activity_execution_latency" {
+                                        activity_execution_latency = data_point.count();
+                                    } else if m.name() == "local_activity_execution_latency" {
+                                        local_activity_execution_latency = data_point.count();
+                                    }
+                                }
+                            } else if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) =
+                                m.data()
+                            {
+                                if m.name() == STICKY_CACHE_SIZE_NAME
+                                    && let Some(data_point) = gauge_data.data_points().next()
+                                {
+                                    sticky_cache_size = data_point.value();
+                                } else if m.name() == "num_pollers" {
+                                    for data_point in gauge_data.data_points() {
+                                        for attr in data_point.attributes() {
+                                            if attr.key.as_str() == "poller_type" {
+                                                match attr.value.as_str().as_ref() {
+                                                    "workflow_task" => {
+                                                        wft_current_pollers = data_point.value()
+                                                    }
+                                                    "sticky_workflow_task" => {
+                                                        sticky_wft_current_pollers =
+                                                            data_point.value()
+                                                    }
+                                                    "activity_task" => {
+                                                        activity_current_pollers =
+                                                            data_point.value()
+                                                    }
+                                                    "nexus_task" => {
+                                                        nexus_current_pollers = data_point.value()
+                                                    }
+                                                    _ => (),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) =
+                                m.data()
+                            {
+                                if let Some(data_point) = sum_data.data_points().next() {
+                                    match m.name() {
+                                        "sticky_cache_hit" => {
+                                            total_sticky_cache_hit = data_point.value()
+                                        }
+                                        "sticky_cache_miss" => {
+                                            total_sticky_cache_miss = data_point.value()
+                                        }
+                                        "workflow_task_execution_failed" => {
+                                            workflow_task_execution_failed = data_point.value()
+                                        }
+                                        "activity_execution_failed" => {
+                                            activity_execution_failed = data_point.value()
+                                        }
+                                        "nexus_task_execution_failed" => {
+                                            nexus_task_execution_failed = data_point.value()
+                                        }
+                                        "local_activity_execution_failed" => {
+                                            local_activity_execution_failed = data_point.value()
+                                        }
+                                        _ => (),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let workflow_poller_info = Some(WorkerPollerInfo {
+                current_pollers: wft_current_pollers as i32,
+                last_successful_poll_time: (*wf_last_suc_poll_time.lock()).map(Into::into),
+                is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+            });
+
+            let workflow_sticky_poller_info = Some(WorkerPollerInfo {
+                current_pollers: sticky_wft_current_pollers as i32,
+                last_successful_poll_time: (*wf_sticky_last_suc_poll_time.lock()).map(Into::into),
+                is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+            });
+
+            let activity_poller_info = Some(WorkerPollerInfo {
+                current_pollers: activity_current_pollers as i32,
+                last_successful_poll_time: (*act_last_suc_poll_time.lock()).map(Into::into),
+                is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
+            });
+
+            let nexus_poller_info = Some(WorkerPollerInfo {
+                current_pollers: nexus_current_pollers as i32,
+                last_successful_poll_time: (*nexus_last_suc_poll_time.lock()).map(Into::into),
+                is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
+            });
+
+            let workflow_task_slots_info = make_slots_info(
+                &wft_slots,
+                workflow_task_execution_latency,
+                workflow_task_execution_failed,
+            );
+            let activity_task_slots_info = make_slots_info(
+                &act_slots,
+                activity_execution_latency,
+                activity_execution_failed,
+            );
+
+            let nexus_task_slots_info = make_slots_info(
+                &nexus_slots,
+                nexus_task_execution_latency,
+                nexus_task_execution_failed,
+            );
+            let local_activity_slots_info = make_slots_info(
+                &la_slots,
+                local_activity_execution_latency,
+                local_activity_execution_failed,
+            );
+
+            let mut sys = System::new_all();
+            sys.refresh_all();
+            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+            sys.refresh_cpu_usage();
+            let current_host_cpu_usage: f32 =
+                sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+            let total_mem = sys.total_memory() as f64;
+            let used_mem = sys.used_memory() as f64;
+            let current_host_mem_usage = (used_mem / total_mem) as f32;
+
+            WorkerHeartbeat {
+                worker_instance_key: worker_instance_key.to_string(),
+                host_info: Some(WorkerHostInfo {
+                    host_name: gethostname().to_string_lossy().to_string(),
+                    process_id: std::process::id().to_string(),
+                    current_host_cpu_usage,
+                    current_host_mem_usage,
+
+                    // Set by SharedNamespaceWorker because it relies on the client
+                    process_key: String::new(),
+                }),
+                task_queue: task_queue.clone(),
+                deployment_version: deployment_version.clone(),
+
+                status: (*status.lock()).try_into().unwrap_or_default(),
+                start_time: Some(SystemTime::now().into()),
+                workflow_task_slots_info,
+                activity_task_slots_info,
+                nexus_task_slots_info,
+                local_activity_slots_info,
+                workflow_poller_info,
+                workflow_sticky_poller_info,
+                activity_poller_info,
+                nexus_poller_info,
+                total_sticky_cache_hit: total_sticky_cache_hit as i32,
+                total_sticky_cache_miss: total_sticky_cache_miss as i32,
+                current_sticky_cache_size: sticky_cache_size as i32,
+                plugins: config.plugins.clone(),
+
+                // sdk_name, sdk_version, and worker_identity must be set by
+                // SharedNamespaceWorker because they rely on the client, and
+                // need to be pulled from the current client used by SharedNamespaceWorker
+                worker_identity: String::new(),
+                heartbeat_time: None,
+                elapsed_since_last_heartbeat: None,
+                sdk_name: String::new(),
+                sdk_version: String::new(),
+            }
+        });
+
+        WorkerHeartbeatManager {
+            heartbeat_interval,
+            telemetry: telemetry_instance,
+            heartbeat_callback: worker_heartbeat_callback,
         }
     }
 }

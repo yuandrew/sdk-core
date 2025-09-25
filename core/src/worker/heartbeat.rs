@@ -37,7 +37,7 @@ impl SharedNamespaceWorker {
             .namespace(namespace.clone())
             .task_queue(format!(
                 "temporal-sys/worker-commands/{namespace}/{}",
-                client.worker_set_key(),
+                client.worker_grouping_key(),
             ))
             .no_remote_activities(true)
             .max_outstanding_nexus_tasks(5_usize)
@@ -77,8 +77,7 @@ impl SharedNamespaceWorker {
                 tokio::select! {
                     _ = ticker.tick() => {
                         let mut hb_to_send = Vec::new();
-                        let heartbeat_map_lock = heartbeat_map_clone.lock();
-                        for (instance_key, heartbeat_callback) in heartbeat_map_lock.iter() {
+                        for (instance_key, heartbeat_callback) in heartbeat_map_clone.lock().iter() {
                             let mut heartbeat = heartbeat_callback();
                             let heartbeat_time = last_heartbeat_time.get(instance_key).cloned();
                             let now = SystemTime::now();

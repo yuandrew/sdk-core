@@ -321,6 +321,7 @@ where
     }
 }
 
+// TODO: Can we remove this and just add this to CoreMeter?
 /// Adds in memory support for [CoreMeter] traits, used for worker heartbeating.
 pub trait CoreMeterWithMem: CoreMeter + Send + Sync + Debug {
     /// Returns an in memory meter, used to query metric state for worker heartbeating.

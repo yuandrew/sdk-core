@@ -50,12 +50,17 @@ pub trait CoreMeter: Send + Sync + Debug {
     /// accordingly.
     fn histogram_duration(&self, params: MetricParameters) -> HistogramDuration;
 
-    fn histogram_duration_with_in_memory(&self, params: MetricParameters, in_memory_meter: &dyn CoreMeter,) -> HistogramDuration {
+    fn histogram_duration_with_in_memory(
+        &self,
+        params: MetricParameters,
+        in_memory_meter: &dyn CoreMeter,
+    ) -> HistogramDuration {
         let primary_hist = self.histogram_duration(params.clone());
         let in_memory_hist = in_memory_meter.histogram_duration(params);
 
         HistogramDuration::new_with_in_memory(
-            primary_hist.primary.metric.clone(), in_memory_hist.primary.metric.clone(),
+            primary_hist.primary.metric.clone(),
+            in_memory_hist.primary.metric.clone(),
         )
     }
     fn gauge(&self, params: MetricParameters) -> Gauge;
@@ -512,13 +517,15 @@ pub trait HistogramDurationBase: Send + Sync {
 #[derive(Clone)]
 pub struct HistogramDuration {
     primary: LazyBoundMetric<
-    Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase> > + Send + Sync>,
-    Arc<dyn HistogramDurationBase>,
-    >,
-    in_memory: Option<LazyBoundMetric<
-        Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase> > + Send + Sync>,
+        Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
         Arc<dyn HistogramDurationBase>,
-    >,>,
+    >,
+    in_memory: Option<
+        LazyBoundMetric<
+            Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+            Arc<dyn HistogramDurationBase>,
+        >,
+    >,
 }
 impl HistogramDuration {
     pub fn new(
@@ -583,7 +590,8 @@ impl HistogramDuration {
 impl HistogramDurationBase for HistogramDuration {
     fn records(&self, value: Duration) {
         let bound = self.primary.bound_cache.get_or_init(|| {
-            self.primary.metric
+            self.primary
+                .metric
                 .with_attributes(&self.primary.attributes)
                 .map(Into::into)
                 .unwrap_or_else(|e| {
@@ -595,11 +603,14 @@ impl HistogramDurationBase for HistogramDuration {
 
         if let Some(ref in_mem) = self.in_memory {
             let bound = in_mem.bound_cache.get_or_init(|| {
-                in_mem.metric
+                in_mem
+                    .metric
                     .with_attributes(&in_mem.attributes)
                     .map(Into::into)
                     .unwrap_or_else(|e| {
-                        dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
+                        dbg_panic!(
+                            "Failed to initialize in-memory metric, will drop values: {e:?}"
+                        );
                         Arc::new(NoOpInstrument) as Arc<dyn HistogramDurationBase>
                     })
             });
