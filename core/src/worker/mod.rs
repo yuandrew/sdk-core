@@ -53,6 +53,7 @@ use activities::WorkerActivityTasks;
 use anyhow::bail;
 use futures_util::{StreamExt, stream};
 use gethostname::gethostname;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, GaugeDataPoint, MetricData};
 use parking_lot::{Mutex, RwLock};
 use slot_provider::SlotProvider;
 use std::time::SystemTime;
@@ -65,15 +66,21 @@ use std::{
     },
     time::Duration,
 };
+use sysinfo::System;
 use temporal_client::{ClientWorker, HeartbeatCallback, Slot as SlotTrait};
 use temporal_client::{
     ConfiguredClient, SharedNamespaceWorkerTrait, TemporalServiceClientWithMetrics,
 };
 use temporal_sdk_core_api::telemetry::metrics::TemporalMeter;
+use temporal_sdk_core_api::worker::{
+    ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind, WorkflowSlotKind,
+};
 use temporal_sdk_core_api::{
     errors::{CompleteNexusError, WorkerValidationError},
     worker::PollerBehavior,
 };
+use temporal_sdk_core_protos::temporal::api::deployment;
+use temporal_sdk_core_protos::temporal::api::enums::v1::WorkerStatus;
 use temporal_sdk_core_protos::temporal::api::worker::v1::{
     WorkerHeartbeat, WorkerHostInfo, WorkerPollerInfo, WorkerSlotsInfo,
 };
@@ -95,6 +102,7 @@ use temporal_sdk_core_protos::{
 use tokio::sync::{mpsc::unbounded_channel, watch};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Subscriber;
 use uuid::Uuid;
 #[cfg(any(feature = "test-utilities", test))]
 use {
@@ -107,14 +115,6 @@ use {
         PollActivityTaskQueueResponse, PollNexusTaskQueueResponse,
     },
 };
-use opentelemetry_sdk::metrics::data::{AggregatedMetrics, GaugeDataPoint, MetricData};
-use sysinfo::{System};
-use temporal_sdk_core_api::worker::{
-    ActivitySlotKind, LocalActivitySlotKind, NexusSlotKind, SlotKind,
-    WorkflowSlotKind,
-};
-use temporal_sdk_core_protos::temporal::api::deployment;
-use tracing::Subscriber;
 
 /// A worker polls on a certain task queue
 pub struct Worker {
@@ -143,6 +143,8 @@ pub struct Worker {
     all_permits_tracker: tokio::sync::Mutex<AllPermitsTracker>,
     /// Used to track worker client
     client_worker_registrator: Arc<ClientWorkerRegistrator>,
+    /// Status
+    status: Arc<Mutex<WorkerStatus>>,
 }
 
 struct AllPermitsTracker {
@@ -173,12 +175,11 @@ struct WorkerHeartbeatManager {
     /// Telemetry instance, needed to initialize [SharedNamespaceWorker] when replacing client
     telemetry: Option<WorkerTelemetry>,
     /// Heartbeat callback
-    heartbeat_callback: Mutex<Option<Box<dyn Fn() -> WorkerHeartbeat + Send + Sync>>>,
+    heartbeat_callback: Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>,
 }
 
 impl WorkerHeartbeatManager {
     fn new(
-        client: Arc<dyn WorkerClient>,
         config: WorkerConfig,
         worker_instance_key: Uuid,
         heartbeat_interval: Duration,
@@ -192,8 +193,8 @@ impl WorkerHeartbeatManager {
         wf_sticky_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
         act_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
         nexus_last_suc_poll_time: Arc<Mutex<Option<SystemTime>>>,
+        status: Arc<Mutex<WorkerStatus>>,
     ) -> Self {
-        let worker_identity = client.identity();
         let task_queue = config.task_queue.clone();
         let deployment_version = config.computed_deployment_version();
         let deployment_version =
@@ -202,7 +203,7 @@ impl WorkerHeartbeatManager {
                 build_id: dv.build_id,
             });
 
-        let worker_heartbeat_callback: HeartbeatFn = Box::new(move || {
+        let worker_heartbeat_callback: HeartbeatFn = Arc::new(move || {
             let mut sticky_cache_size = 0;
             let mut total_sticky_cache_hit = 0;
             let mut total_sticky_cache_miss = 0;
@@ -210,12 +211,14 @@ impl WorkerHeartbeatManager {
             let mut sticky_wft_current_pollers = 0;
             let mut activity_current_pollers = 0;
             let mut nexus_current_pollers = 0;
-            let mut workflow_task_queue_poll_succeed = 0;
             let mut workflow_task_execution_failed = 0;
-            let mut activity_task_received = 0;
             let mut activity_execution_failed = 0;
             let mut nexus_task_execution_failed = 0;
             let mut local_activity_execution_failed = 0;
+            let mut activity_execution_latency = 0;
+            let mut local_activity_execution_latency = 0;
+            let mut workflow_task_execution_latency = 0;
+            let mut nexus_task_execution_latency = 0;
 
             if let Some(in_mem_meter) = in_memory_meter.clone()
                 && let Ok(metrics) = in_mem_meter.get_metrics()
@@ -223,13 +226,34 @@ impl WorkerHeartbeatManager {
                 for metric in metrics {
                     for sm in metric.scope_metrics() {
                         for m in sm.metrics() {
-                            if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) = m.data()
-                            {
-                                if m.name() == STICKY_CACHE_SIZE_NAME {
-                                    if let Some(data_point) = gauge_data.data_points().next() {
-                                        sticky_cache_size = data_point.value();
-                                        break; //TODO: why break?
+                            if let AggregatedMetrics::F64(MetricData::Histogram(histogram_data)) = m.data() {
+                                // println!("m.name {:?}", m.name());
+                                if let Some(data_point) = histogram_data.data_points().next() {
+                                    match m.name() {
+                                        "activity_execution_latency" => {
+                                            activity_execution_latency = data_point.count();
+                                        }
+                                        "local_activity_execution_latency" => {
+                                            local_activity_execution_latency = data_point.count();
+                                        }
+                                        "workflow_task_execution_latency" => {
+                                            workflow_task_execution_latency = data_point.count();
+                                        }
+                                        "nexus_task_execution_latency" => {
+                                            nexus_task_execution_latency = data_point.count();
+                                        }
+                                        _ => (),
                                     }
+                                    if m.name() == "activity_execution_latency" {
+                                        activity_execution_latency = data_point.count();
+                                    } else if m.name() == "local_activity_execution_latency" {
+                                        local_activity_execution_latency = data_point.count();
+                                    }
+                                }
+                            } else if let AggregatedMetrics::U64(MetricData::Gauge(gauge_data)) = m.data()
+                            {
+                                if m.name() == STICKY_CACHE_SIZE_NAME && let Some(data_point) = gauge_data.data_points().next() {
+                                    sticky_cache_size = data_point.value();
                                 } else if m.name() == "num_pollers" {
                                     for data_point in gauge_data.data_points() {
                                         for attr in data_point.attributes() {
@@ -255,13 +279,7 @@ impl WorkerHeartbeatManager {
                                         }
                                     }
                                 }
-                            }
-                            if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
-                                // let v: Vec<_> =
-                                //     sum_data.data_points().map(|dp| dp.value()).collect();
-                                // println!("sum_data_len {:?}", v.len());
-                                // TODO: is there ever a scenario where len > 1? From printing, I don't see it
-                                //  but maybe in a more complex scenario than my test is running?
+                            }  else if let AggregatedMetrics::U64(MetricData::Sum(sum_data)) = m.data() {
                                 if let Some(data_point) = sum_data.data_points().next() {
                                     match m.name() {
                                         "sticky_cache_hit" => {
@@ -270,14 +288,8 @@ impl WorkerHeartbeatManager {
                                         "sticky_cache_miss" => {
                                             total_sticky_cache_miss = data_point.value()
                                         }
-                                        "workflow_task_queue_poll_succeed" => {
-                                            workflow_task_queue_poll_succeed = data_point.value()
-                                        }
                                         "workflow_task_execution_failed" => {
                                             workflow_task_execution_failed = data_point.value()
-                                        }
-                                        "activity_task_received" => {
-                                            activity_task_received = data_point.value()
                                         }
                                         "activity_execution_failed" => {
                                             activity_execution_failed = data_point.value()
@@ -288,11 +300,9 @@ impl WorkerHeartbeatManager {
                                         "local_activity_execution_failed" => {
                                             local_activity_execution_failed = data_point.value()
                                         }
-                                        _ => println!("TODO: Unrecognized m.name {:?}", m.name()),
+                                        _ => (),
                                     }
                                 }
-                                println!("m.name {:?}", m.name());
-                                println!("m: {m:#?}");
                             }
                         }
                     }
@@ -325,45 +335,48 @@ impl WorkerHeartbeatManager {
 
             let workflow_task_slots_info = make_slots_info(
                 &wft_slots,
-                workflow_task_queue_poll_succeed,
+                workflow_task_execution_latency,
                 workflow_task_execution_failed,
             );
             let activity_task_slots_info = make_slots_info(
                 &act_slots,
-                activity_task_received,
+                activity_execution_latency,
                 activity_execution_failed,
             );
 
-            // TODO: total_process for both these
             let nexus_task_slots_info =
-                make_slots_info(&nexus_slots, 0, nexus_task_execution_failed);
-            let local_activity_slots_info =
-                make_slots_info(&la_slots, 0, local_activity_execution_failed);
+                make_slots_info(&nexus_slots, nexus_task_execution_latency, nexus_task_execution_failed);
+            let local_activity_slots_info = make_slots_info(
+                &la_slots,
+                local_activity_execution_latency,
+                local_activity_execution_failed,
+            );
 
             let mut sys = System::new_all();
             sys.refresh_all();
             std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
             sys.refresh_cpu_usage();
-            let current_host_cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+            let current_host_cpu_usage: f32 =
+                sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
             let total_mem = sys.total_memory() as f64;
             let used_mem = sys.used_memory() as f64;
             let current_host_mem_usage = (used_mem / total_mem) as f32;
 
-
             WorkerHeartbeat {
                 worker_instance_key: worker_instance_key.to_string(),
-                worker_identity: worker_identity.clone(),
                 host_info: Some(WorkerHostInfo {
                     host_name: gethostname().to_string_lossy().to_string(),
                     process_id: std::process::id().to_string(),
-                    process_key: client.worker_set_key().to_string(),
                     current_host_cpu_usage,
                     current_host_mem_usage,
+
+                    // Set by SharedNamespaceWorker because it relies on the client
+                    process_key: String::new(),
                 }),
                 task_queue: task_queue.clone(),
                 deployment_version: deployment_version.clone(),
 
-                status: 0, // TODO
+                status: (*status.lock()).try_into().unwrap_or_default(),
                 start_time: Some(SystemTime::now().into()),
                 workflow_task_slots_info,
                 activity_task_slots_info,
@@ -376,11 +389,12 @@ impl WorkerHeartbeatManager {
                 total_sticky_cache_hit: total_sticky_cache_hit as i32,
                 total_sticky_cache_miss: total_sticky_cache_miss as i32,
                 current_sticky_cache_size: sticky_cache_size as i32,
-                plugins: vec![], // TODO:
+                plugins: config.plugins.clone(),
 
                 // sdk_name, sdk_version, and worker_identity must be set by
                 // SharedNamespaceWorker because they rely on the client, and
                 // need to be pulled from the current client used by SharedNamespaceWorker
+                worker_identity: String::new(),
                 heartbeat_time: None,
                 elapsed_since_last_heartbeat: None,
                 sdk_name: String::new(),
@@ -391,7 +405,7 @@ impl WorkerHeartbeatManager {
         WorkerHeartbeatManager {
             heartbeat_interval,
             telemetry: telemetry_instance,
-            heartbeat_callback: Mutex::new(Some(worker_heartbeat_callback)),
+            heartbeat_callback: worker_heartbeat_callback,
         }
     }
 }
@@ -491,6 +505,7 @@ impl WorkerTrait for Worker {
             );
         }
         self.shutdown_token.cancel();
+        *self.status.lock() = WorkerStatus::ShuttingDown;
         // First, unregister worker from the client
         if let Err(e) = self
             .client
@@ -833,11 +848,11 @@ impl Worker {
             external_wft_tx,
         );
         let worker_instance_key = Uuid::new_v4();
+        let worker_status = Arc::new(Mutex::new(WorkerStatus::Running));
 
         let sdk_name_and_ver = client.sdk_name_and_version();
         let worker_heartbeat = worker_heartbeat_interval.map(|hb_interval| {
             WorkerHeartbeatManager::new(
-                client.clone(),
                 config.clone(),
                 worker_instance_key,
                 hb_interval,
@@ -851,6 +866,7 @@ impl Worker {
                 wf_sticky_last_suc_poll_time,
                 act_last_suc_poll_time,
                 nexus_last_suc_poll_time,
+                worker_status.clone(),
             )
         });
 
@@ -926,6 +942,7 @@ impl Worker {
             }),
             nexus_mgr,
             client_worker_registrator,
+            status: worker_status,
         })
     }
 
@@ -934,8 +951,16 @@ impl Worker {
     async fn shutdown(&self) {
         self.initiate_shutdown();
         if let Some(name) = self.workflows.get_sticky_queue_name() {
+            let heartbeat = if let Some(heartbeat_mgr) =
+                self.client_worker_registrator.heartbeat_manager.as_ref()
+            {
+                Some(heartbeat_mgr.heartbeat_callback.clone()())
+            } else {
+                None
+            };
+
             // This is a best effort call and we can still shutdown the worker if it fails
-            match self.client.shutdown_worker(name).await {
+            match self.client.shutdown_worker(name, heartbeat).await {
                 Err(err)
                     if !matches!(
                         err.code(),
@@ -1262,8 +1287,7 @@ impl ClientWorker for ClientWorkerRegistrator {
 
     fn heartbeat_callback(&self) -> Option<HeartbeatCallback> {
         if let Some(hb_mgr) = self.heartbeat_manager.as_ref() {
-            let mut heartbeat_manager = hb_mgr.heartbeat_callback.lock();
-            heartbeat_manager.take()
+            Some(hb_mgr.heartbeat_callback.clone())
         } else {
             None
         }
@@ -1280,12 +1304,6 @@ impl ClientWorker for ClientWorkerRegistrator {
             )?))
         } else {
             bail!("Shared namespace worker creation never be called without a heartbeat manager");
-        }
-    }
-
-    fn register_callback(&self, callback: HeartbeatCallback) {
-        if let Some(hb_mgr) = self.heartbeat_manager.as_ref() {
-            hb_mgr.heartbeat_callback.lock().replace(callback);
         }
     }
 }
@@ -1333,13 +1351,11 @@ fn make_slots_info<SK>(
     total_failed: u64,
 ) -> Option<WorkerSlotsInfo>
 where
-    SK: SlotKind + 'static, // or Display if you prefer
+    SK: SlotKind + 'static,
 {
-    // TODO: If either is unknown, return None instead of panicking.
     let avail_usize = dealer.available_permits()?;
     let max_usize = dealer.max_permits()?;
 
-    // TODO: safe to assume u32 to i32 would be fine? prob okay to use as
     let avail = i32::try_from(avail_usize).unwrap_or(i32::MAX);
     let max = i32::try_from(max_usize).unwrap_or(i32::MAX);
 
@@ -1348,7 +1364,7 @@ where
     Some(WorkerSlotsInfo {
         current_available_slots: avail,
         current_used_slots: used,
-        slot_supplier_kind: dealer.kind().to_string(), // TODO: or SK::to_string()
+        slot_supplier_kind: SK::kind().to_string(),
         total_processed_tasks: i32::try_from(total_processed).unwrap_or(i32::MAX),
         total_failed_tasks: i32::try_from(total_failed).unwrap_or(i32::MAX),
 

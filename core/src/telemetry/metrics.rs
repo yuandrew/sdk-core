@@ -329,6 +329,13 @@ impl Instruments {
             }
         };
 
+        let create_histogram_duration = |params: MetricParameters| -> HistogramDuration {
+            match in_mem_meter {
+                Some(in_mem) => meter.histogram_duration_with_in_memory(params, in_mem),
+                None => meter.histogram_duration(params),
+            }
+        };
+
         Self {
             wf_completed_counter: meter.counter(MetricParameters {
                 name: "workflow_completed".into(),
@@ -380,7 +387,7 @@ impl Instruments {
                 unit: "duration".into(),
                 description: "Histogram of workflow task replay latencies".into(),
             }),
-            wf_task_execution_latency: meter.histogram_duration(MetricParameters {
+            wf_task_execution_latency: create_histogram_duration(MetricParameters {
                 name: WORKFLOW_TASK_EXECUTION_LATENCY_HISTOGRAM_NAME.into(),
                 unit: "duration".into(),
                 description: "Histogram of workflow task execution (not replay) latencies".into(),
@@ -405,7 +412,7 @@ impl Instruments {
                 unit: "duration".into(),
                 description: "Histogram of activity schedule-to-start latencies".into(),
             }),
-            act_exec_latency: meter.histogram_duration(MetricParameters {
+            act_exec_latency: create_histogram_duration(MetricParameters {
                 name: ACTIVITY_EXEC_LATENCY_HISTOGRAM_NAME.into(),
                 unit: "duration".into(),
                 description: "Histogram of activity execution latencies".into(),
@@ -426,7 +433,7 @@ impl Instruments {
                 description: "Count of local activity executions that failed".into(),
                 unit: "".into(),
             }),
-            la_exec_latency: meter.histogram_duration(MetricParameters {
+            la_exec_latency: create_histogram_duration(MetricParameters {
                 name: "local_activity_execution_latency".into(),
                 unit: "duration".into(),
                 description: "Histogram of local activity execution latencies".into(),
@@ -438,7 +445,7 @@ impl Instruments {
                     "Histogram of local activity execution latencies for successful local activities"
                         .into(),
             }),
-            la_total: meter.counter(MetricParameters {
+            la_total: create_counter(MetricParameters {
                 name: "local_activity_total".into(),
                 description: "Count of local activities executed".into(),
                 unit: "".into(),
@@ -458,7 +465,7 @@ impl Instruments {
                 unit: "duration".into(),
                 description: "Histogram of nexus task end-to-end latencies".into(),
             }),
-            nexus_task_execution_latency: meter.histogram_duration(MetricParameters {
+            nexus_task_execution_latency: create_histogram_duration(MetricParameters {
                 name: "nexus_task_execution_latency".into(),
                 unit: "duration".into(),
                 description: "Histogram of nexus task execution latencies".into(),

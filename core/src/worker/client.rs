@@ -2,13 +2,14 @@
 
 pub(crate) mod mocks;
 use crate::protosext::legacy_query_failure;
-use parking_lot::{ RwLock};
+use parking_lot::RwLock;
 use std::{sync::Arc, time::Duration};
 use temporal_client::{
     Client, ClientWorkerSet, IsWorkerTaskLongPoll, Namespace, NamespacedClient, NoRetryOnMatching,
     RetryClient, WorkflowService,
 };
 use temporal_sdk_core_api::worker::WorkerVersioningStrategy;
+use temporal_sdk_core_protos::temporal::api::enums::v1::WorkerStatus;
 use temporal_sdk_core_protos::{
     TaskToken,
     coresdk::{workflow_commands::QueryResult, workflow_completion},
@@ -211,7 +212,11 @@ pub trait WorkerClient: Sync + Send {
     /// Describe the namespace
     async fn describe_namespace(&self) -> Result<DescribeNamespaceResponse>;
     /// Shutdown the worker
-    async fn shutdown_worker(&self, sticky_task_queue: String) -> Result<ShutdownWorkerResponse>;
+    async fn shutdown_worker(
+        &self,
+        sticky_task_queue: String,
+        worker_heartbeat: Option<WorkerHeartbeat>,
+    ) -> Result<ShutdownWorkerResponse>;
     /// Record a worker heartbeat
     async fn record_worker_heartbeat(
         &self,
@@ -640,13 +645,21 @@ impl WorkerClient for WorkerClientBag {
             .into_inner())
     }
 
-    async fn shutdown_worker(&self, sticky_task_queue: String) -> Result<ShutdownWorkerResponse> {
+    async fn shutdown_worker(
+        &self,
+        sticky_task_queue: String,
+        worker_heartbeat: Option<WorkerHeartbeat>,
+    ) -> Result<ShutdownWorkerResponse> {
+        let mut worker_heartbeat = worker_heartbeat;
+        if let Some(w) = worker_heartbeat.as_mut() {
+            w.status = WorkerStatus::Shutdown.into();
+        }
         let request = ShutdownWorkerRequest {
             namespace: self.namespace.clone(),
             identity: self.identity.clone(),
             sticky_task_queue,
             reason: "graceful shutdown".to_string(),
-            worker_heartbeat: None,
+            worker_heartbeat,
         };
 
         Ok(

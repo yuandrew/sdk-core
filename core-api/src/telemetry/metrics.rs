@@ -33,7 +33,6 @@ pub trait CoreMeter: Send + Sync + Debug {
         params: MetricParameters,
         in_memory_meter: &dyn CoreMeter,
     ) -> Counter {
-        // Get the underlying metric implementations
         let primary_counter = self.counter(params.clone());
         let in_memory_counter = in_memory_meter.counter(params);
 
@@ -50,6 +49,15 @@ pub trait CoreMeter: Send + Sync + Debug {
     /// [MetricParameters::unit] should be overwritten by implementations to be `ms` or `s`
     /// accordingly.
     fn histogram_duration(&self, params: MetricParameters) -> HistogramDuration;
+
+    fn histogram_duration_with_in_memory(&self, params: MetricParameters, in_memory_meter: &dyn CoreMeter,) -> HistogramDuration {
+        let primary_hist = self.histogram_duration(params.clone());
+        let in_memory_hist = in_memory_meter.histogram_duration(params);
+
+        HistogramDuration::new_with_in_memory(
+            primary_hist.primary.metric.clone(), in_memory_hist.primary.metric.clone(),
+        )
+    }
     fn gauge(&self, params: MetricParameters) -> Gauge;
 
     /// Create a gauge with in-memory tracking for dual metrics reporting
@@ -58,7 +66,6 @@ pub trait CoreMeter: Send + Sync + Debug {
         params: MetricParameters,
         in_memory_meter: &dyn CoreMeter,
     ) -> Gauge {
-        // Get the underlying metric implementations
         let primary_gauge = self.gauge(params.clone());
         let in_memory_gauge = in_memory_meter.gauge(params);
 
@@ -324,12 +331,10 @@ impl Counter {
     }
 
     pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
-        self.primary.attributes = new_attributes.clone();
-        self.primary.bound_cache = OnceLock::new();
+        self.primary.update_attributes(new_attributes.clone());
 
         if let Some(ref mut in_mem) = self.in_memory {
-            in_mem.attributes = new_attributes;
-            in_mem.bound_cache = OnceLock::new();
+            in_mem.update_attributes(new_attributes);
         }
     }
 }
@@ -503,22 +508,50 @@ impl MetricAttributable<HistogramF64> for HistogramF64 {
 pub trait HistogramDurationBase: Send + Sync {
     fn records(&self, value: Duration);
 }
-pub type HistogramDuration = LazyBoundMetric<
-    Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+
+#[derive(Clone)]
+pub struct HistogramDuration {
+    primary: LazyBoundMetric<
+    Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase> > + Send + Sync>,
     Arc<dyn HistogramDurationBase>,
->;
+    >,
+    in_memory: Option<LazyBoundMetric<
+        Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase> > + Send + Sync>,
+        Arc<dyn HistogramDurationBase>,
+    >,>,
+}
 impl HistogramDuration {
     pub fn new(
         inner: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
     ) -> Self {
         Self {
-            metric: inner,
-            attributes: MetricAttributes::Empty,
-            bound_cache: OnceLock::new(),
+            primary: LazyBoundMetric {
+                metric: inner,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: None,
+        }
+    }
+    pub fn new_with_in_memory(
+        primary: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+        in_memory: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+    ) -> Self {
+        Self {
+            primary: LazyBoundMetric {
+                metric: primary,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            },
+            in_memory: Some(LazyBoundMetric {
+                metric: in_memory,
+                attributes: MetricAttributes::Empty,
+                bound_cache: OnceLock::new(),
+            }),
         }
     }
     pub fn record(&self, value: Duration, attributes: &MetricAttributes) {
-        match self.metric.with_attributes(attributes) {
+        match self.primary.metric.with_attributes(attributes) {
             Ok(base) => {
                 base.records(value);
             }
@@ -526,13 +559,32 @@ impl HistogramDuration {
                 dbg_panic!("Failed to initialize metric, will drop values: {e:?}",);
             }
         }
+
+        if let Some(ref in_mem) = self.in_memory {
+            match in_mem.metric.with_attributes(attributes) {
+                Ok(base) => {
+                    base.records(value);
+                }
+                Err(e) => {
+                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}",);
+                }
+            }
+        }
+    }
+
+    pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
+        self.primary.update_attributes(new_attributes.clone());
+
+        if let Some(ref mut in_mem) = self.in_memory {
+            in_mem.update_attributes(new_attributes);
+        }
     }
 }
 impl HistogramDurationBase for HistogramDuration {
     fn records(&self, value: Duration) {
-        let bound = self.bound_cache.get_or_init(|| {
-            self.metric
-                .with_attributes(&self.attributes)
+        let bound = self.primary.bound_cache.get_or_init(|| {
+            self.primary.metric
+                .with_attributes(&self.primary.attributes)
                 .map(Into::into)
                 .unwrap_or_else(|e| {
                     dbg_panic!("Failed to initialize metric, will drop values: {e:?}");
@@ -540,6 +592,19 @@ impl HistogramDurationBase for HistogramDuration {
                 })
         });
         bound.records(value);
+
+        if let Some(ref in_mem) = self.in_memory {
+            let bound = in_mem.bound_cache.get_or_init(|| {
+                in_mem.metric
+                    .with_attributes(&in_mem.attributes)
+                    .map(Into::into)
+                    .unwrap_or_else(|e| {
+                        dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
+                        Arc::new(NoOpInstrument) as Arc<dyn HistogramDurationBase>
+                    })
+            });
+            bound.records(value);
+        }
     }
 }
 impl MetricAttributable<HistogramDuration> for HistogramDuration {
@@ -547,11 +612,23 @@ impl MetricAttributable<HistogramDuration> for HistogramDuration {
         &self,
         attributes: &MetricAttributes,
     ) -> Result<HistogramDuration, Box<dyn std::error::Error>> {
-        Ok(Self {
-            metric: self.metric.clone(),
+        let primary = LazyBoundMetric {
+            metric: self.primary.metric.clone(),
             attributes: attributes.clone(),
             bound_cache: OnceLock::new(),
-        })
+        };
+
+        let in_memory = if let Some(ref in_mem) = self.in_memory {
+            Some(LazyBoundMetric {
+                metric: in_mem.metric.clone(),
+                attributes: attributes.clone(),
+                bound_cache: OnceLock::new(),
+            })
+        } else {
+            None
+        };
+
+        Ok(HistogramDuration { primary, in_memory })
     }
 }
 
@@ -621,12 +698,10 @@ impl Gauge {
     }
 
     pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
-        self.primary.attributes = new_attributes.clone();
-        self.primary.bound_cache = OnceLock::new();
+        self.primary.update_attributes(new_attributes.clone());
 
         if let Some(ref mut in_mem) = self.in_memory {
-            in_mem.attributes = new_attributes;
-            in_mem.bound_cache = OnceLock::new();
+            in_mem.update_attributes(new_attributes);
         }
     }
 }

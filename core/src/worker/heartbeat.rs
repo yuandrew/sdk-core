@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Callback used to collect heartbeat data from each worker at the time of heartbeat
-pub(crate) type HeartbeatFn = Box<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
+pub(crate) type HeartbeatFn = Arc<dyn Fn() -> WorkerHeartbeat + Send + Sync>;
 
 /// SharedNamespaceWorker is responsible for polling nexus-delivered worker commands and sending
 /// worker heartbeats to the server. This invokes callbacks on all workers in the same process that
@@ -140,19 +140,12 @@ impl SharedNamespaceWorkerTrait for SharedNamespaceWorker {
         self.namespace.clone()
     }
 
-    fn register_callback(
-        &self,
-        worker_instance_key: Uuid,
-        heartbeat_callback: Box<dyn Fn() -> WorkerHeartbeat + Send + Sync>,
-    ) {
+    fn register_callback(&self, worker_instance_key: Uuid, heartbeat_callback: HeartbeatFn) {
         self.heartbeat_map
             .lock()
             .insert(worker_instance_key, heartbeat_callback);
     }
-    fn unregister_callback(
-        &self,
-        worker_instance_key: Uuid,
-    ) -> (Option<Box<dyn Fn() -> WorkerHeartbeat + Send + Sync>>, bool) {
+    fn unregister_callback(&self, worker_instance_key: Uuid) -> (Option<HeartbeatFn>, bool) {
         let mut heartbeat_map = self.heartbeat_map.lock();
         let heartbeat_callback = heartbeat_map.remove(&worker_instance_key);
         if heartbeat_map.is_empty() {

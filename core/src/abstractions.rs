@@ -164,10 +164,6 @@ where
     pub(crate) fn max_permits(&self) -> Option<usize> {
         self.max_permits
     }
-
-    pub(crate) fn kind(&self) -> SlotKindType {
-        SK::kind()
-    }
 }
 
 impl MeteredPermitDealer<WorkflowSlotKind> {
