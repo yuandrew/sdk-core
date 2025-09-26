@@ -1139,32 +1139,6 @@ impl WorkerHeartbeatManager {
                 sdk_version: String::new(),
             };
 
-            // TODO:
-            // else if m.name() == "num_pollers" {
-            //     for data_point in gauge_data.data_points() {
-            //         for attr in data_point.attributes() {
-            //             if attr.key.as_str() == "poller_type" {
-            //                 match attr.value.as_str().as_ref() {
-            //                     "workflow_task" => {
-            //                         wft_current_pollers = data_point.value()
-            //                     }
-            //                     "sticky_workflow_task" => {
-            //                         sticky_wft_current_pollers =
-            //                             data_point.value()
-            //                     }
-            //                     "activity_task" => {
-            //                         activity_current_pollers =
-            //                             data_point.value()
-            //                     }
-            //                     "nexus_task" => {
-            //                         nexus_current_pollers = data_point.value()
-            //                     }
-            //                     _ => (),
-            //                 }
-            //             }
-            //         }
-            //     }
-
             if let Some(telem_instance) = telemetry_instance_clone.as_ref()
                 && let Some(in_mem) = telem_instance.in_memory_meter.as_ref()
             {
@@ -1174,37 +1148,45 @@ impl WorkerHeartbeatManager {
                     in_mem.total_sticky_cache_miss.load(Ordering::Relaxed) as i32;
                 worker_heartbeat.current_sticky_cache_size =
                     in_mem.sticky_cache_size.load(Ordering::Relaxed) as i32;
-                if let Some(last_successful_poll_time) = *wf_last_suc_poll_time.lock() {
-                    worker_heartbeat.workflow_poller_info = Some(WorkerPollerInfo {
-                        current_pollers: in_mem.wft_current_pollers.load(Ordering::Relaxed) as i32,
-                        last_successful_poll_time: Some(last_successful_poll_time.into()), // TODO: Does this need to be option?
-                        is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
-                    })
-                }
-                if let Some(last_successful_poll_time) = *wf_sticky_last_suc_poll_time.lock() {
-                    worker_heartbeat.workflow_sticky_poller_info = Some(WorkerPollerInfo {
-                        current_pollers: in_mem.sticky_wft_current_pollers.load(Ordering::Relaxed)
-                            as i32,
-                        last_successful_poll_time: Some(last_successful_poll_time.into()),
-                        is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
-                    })
-                }
-                if let Some(last_successful_poll_time) = *act_last_suc_poll_time.lock() {
-                    worker_heartbeat.workflow_poller_info = Some(WorkerPollerInfo {
-                        current_pollers: in_mem.activity_current_pollers.load(Ordering::Relaxed)
-                            as i32,
-                        last_successful_poll_time: Some(last_successful_poll_time.into()),
-                        is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
-                    })
-                }
-                if let Some(last_successful_poll_time) = *nexus_last_suc_poll_time.lock() {
-                    worker_heartbeat.workflow_poller_info = Some(WorkerPollerInfo {
-                        current_pollers: in_mem.nexus_current_pollers.load(Ordering::Relaxed)
-                            as i32,
-                        last_successful_poll_time: Some(last_successful_poll_time.into()),
-                        is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
-                    })
-                }
+                // TODO: Is this ever not Some()?
+                worker_heartbeat.workflow_poller_info = Some(WorkerPollerInfo {
+                    current_pollers: in_mem
+                        .num_pollers
+                        .wft_current_pollers
+                        .load(Ordering::Relaxed) as i32,
+                    last_successful_poll_time: wf_last_suc_poll_time.lock().map(|time| time.into()),
+                    is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+                });
+
+                worker_heartbeat.workflow_sticky_poller_info = Some(WorkerPollerInfo {
+                    current_pollers: in_mem
+                        .num_pollers
+                        .sticky_wft_current_pollers
+                        .load(Ordering::Relaxed) as i32,
+                    last_successful_poll_time: wf_sticky_last_suc_poll_time
+                        .lock()
+                        .map(|time| time.into()),
+                    is_autoscaling: config.workflow_task_poller_behavior.is_autoscaling(),
+                });
+                worker_heartbeat.activity_poller_info = Some(WorkerPollerInfo {
+                    current_pollers: in_mem
+                        .num_pollers
+                        .activity_current_pollers
+                        .load(Ordering::Relaxed) as i32,
+                    last_successful_poll_time: act_last_suc_poll_time
+                        .lock()
+                        .map(|time| time.into()),
+                    is_autoscaling: config.activity_task_poller_behavior.is_autoscaling(),
+                });
+                worker_heartbeat.nexus_poller_info = Some(WorkerPollerInfo {
+                    current_pollers: in_mem
+                        .num_pollers
+                        .nexus_current_pollers
+                        .load(Ordering::Relaxed) as i32,
+                    last_successful_poll_time: nexus_last_suc_poll_time.lock().map(|time| time.into()),
+                    is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
+                });
+
                 worker_heartbeat.workflow_task_slots_info = make_slots_info(
                     &wft_slots,
                     in_mem

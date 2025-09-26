@@ -32,7 +32,7 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn counter_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_counter: Arc<AtomicU64>,
+        in_memory_counter: HeartbeatMetricType,
     ) -> Counter {
         let primary_counter = self.counter(params.clone());
 
@@ -50,7 +50,7 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn histogram_duration_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_hist: Arc<AtomicU64>,
+        in_memory_hist: HeartbeatMetricType,
     ) -> HistogramDuration {
         let primary_hist = self.histogram_duration(params.clone());
 
@@ -62,12 +62,10 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn gauge_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_gauge: Arc<AtomicU64>,
+        in_memory_metrics: HeartbeatMetricType,
     ) -> Gauge {
         let primary_gauge = self.gauge(params.clone());
-        // TODO: This one uses
-
-        Gauge::new_with_in_memory(primary_gauge.primary.metric.clone(), in_memory_gauge)
+        Gauge::new_with_in_memory(primary_gauge.primary.metric.clone(), in_memory_metrics)
     }
 
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64;
@@ -75,15 +73,46 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics>;
 }
 
+#[derive(Clone, Debug)]
+pub enum HeartbeatMetricType {
+    Regular(Arc<AtomicU64>),
+    WithLabel(HashMap<String, Arc<AtomicU64>>),
+}
+
+#[derive(Default, Debug)]
+pub struct NumPollersMetric {
+    pub wft_current_pollers: Arc<AtomicU64>,
+    pub sticky_wft_current_pollers: Arc<AtomicU64>,
+    pub activity_current_pollers: Arc<AtomicU64>,
+    pub nexus_current_pollers: Arc<AtomicU64>,
+}
+
+impl NumPollersMetric {
+    pub fn as_map(&self) -> HashMap<String, Arc<AtomicU64>> {
+        let mut map = HashMap::new();
+        map.insert(
+            "workflow_task".to_string(),
+            self.wft_current_pollers.clone(),
+        );
+        map.insert(
+            "sticky_workflow_task".to_string(),
+            self.sticky_wft_current_pollers.clone(),
+        );
+        map.insert(
+            "activity_task".to_string(),
+            self.activity_current_pollers.clone(),
+        );
+        map.insert("nexus_task".to_string(), self.nexus_current_pollers.clone());
+        map
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct WorkerHeartbeatMetrics {
     pub sticky_cache_size: Arc<AtomicU64>,
     pub total_sticky_cache_hit: Arc<AtomicU64>,
     pub total_sticky_cache_miss: Arc<AtomicU64>,
-    pub wft_current_pollers: Arc<AtomicU64>,
-    pub sticky_wft_current_pollers: Arc<AtomicU64>,
-    pub activity_current_pollers: Arc<AtomicU64>,
-    pub nexus_current_pollers: Arc<AtomicU64>,
+    pub num_pollers: NumPollersMetric,
     pub workflow_task_execution_failed: Arc<AtomicU64>,
     pub activity_execution_failed: Arc<AtomicU64>,
     pub nexus_task_execution_failed: Arc<AtomicU64>,
@@ -95,27 +124,47 @@ pub struct WorkerHeartbeatMetrics {
 }
 
 impl WorkerHeartbeatMetrics {
-    pub fn get_metric(&self, name: &str) -> Option<Arc<AtomicU64>> {
+    pub fn get_metric(&self, name: &str) -> Option<HeartbeatMetricType> {
         match name {
-            "sticky_cache_size" => Some(self.sticky_cache_size.clone()),
-            "sticky_cache_hit" => Some(self.total_sticky_cache_hit.clone()),
-            "sticky_cache_miss" => Some(self.total_sticky_cache_miss.clone()),
-            // TODO: need to look up "num_pollers" metric with poller_type==workflow_task
-            "num_pollers" => Some(self.wft_current_pollers.clone()),
-            "sticky_wft_current_pollers" => Some(self.sticky_wft_current_pollers.clone()),
-            "activity_current_pollers" => Some(self.activity_current_pollers.clone()),
-            "nexus_current_pollers" => Some(self.nexus_current_pollers.clone()),
-
-            "workflow_task_execution_failed" => Some(self.workflow_task_execution_failed.clone()),
-            "activity_execution_failed" => Some(self.activity_execution_failed.clone()),
-            "nexus_task_execution_failed" => Some(self.nexus_task_execution_failed.clone()),
-            "local_activity_execution_failed" => Some(self.local_activity_execution_failed.clone()),
-            "activity_execution_latency" => Some(self.activity_execution_latency.clone()),
-            "local_activity_execution_latency" => {
-                Some(self.local_activity_execution_latency.clone())
+            "sticky_cache_size" => {
+                Some(HeartbeatMetricType::Regular(self.sticky_cache_size.clone()))
             }
-            "workflow_task_execution_latency" => Some(self.workflow_task_execution_latency.clone()),
-            "nexus_task_execution_latency" => Some(self.nexus_task_execution_latency.clone()),
+            "sticky_cache_hit" => Some(HeartbeatMetricType::Regular(
+                self.total_sticky_cache_hit.clone(),
+            )),
+            "sticky_cache_miss" => Some(HeartbeatMetricType::Regular(
+                self.total_sticky_cache_miss.clone(),
+            )),
+            // TODO: need to look up "num_pollers" metric with poller_type==workflow_task
+            "num_pollers" => Some(HeartbeatMetricType::WithLabel(self.num_pollers.as_map())),
+            // "wft_current_pollers" => Some(HeartbeatMetricType::Regular(self.wft_current_pollers.clone())),
+            // "sticky_wft_current_pollers" => Some(HeartbeatMetricType::Regular(self.sticky_wft_current_pollers.clone())),
+            // "activity_current_pollers" => Some(HeartbeatMetricType::Regular(self.activity_current_pollers.clone())),
+            // "nexus_current_pollers" => Some(HeartbeatMetricType::Regular(self.nexus_current_pollers.clone())),
+            "workflow_task_execution_failed" => Some(HeartbeatMetricType::Regular(
+                self.workflow_task_execution_failed.clone(),
+            )),
+            "activity_execution_failed" => Some(HeartbeatMetricType::Regular(
+                self.activity_execution_failed.clone(),
+            )),
+            "nexus_task_execution_failed" => Some(HeartbeatMetricType::Regular(
+                self.nexus_task_execution_failed.clone(),
+            )),
+            "local_activity_execution_failed" => Some(HeartbeatMetricType::Regular(
+                self.local_activity_execution_failed.clone(),
+            )),
+            "activity_execution_latency" => Some(HeartbeatMetricType::Regular(
+                self.activity_execution_latency.clone(),
+            )),
+            "local_activity_execution_latency" => Some(HeartbeatMetricType::Regular(
+                self.local_activity_execution_latency.clone(),
+            )),
+            "workflow_task_execution_latency" => Some(HeartbeatMetricType::Regular(
+                self.workflow_task_execution_latency.clone(),
+            )),
+            "nexus_task_execution_latency" => Some(HeartbeatMetricType::Regular(
+                self.nexus_task_execution_latency.clone(),
+            )),
             _ => None,
         }
     }
@@ -322,7 +371,7 @@ pub struct Counter {
         Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
         Arc<dyn CounterBase>,
     >,
-    in_memory: Option<Arc<AtomicU64>>,
+    in_memory: Option<HeartbeatMetricType>,
 }
 impl Counter {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>) -> Self {
@@ -338,7 +387,7 @@ impl Counter {
 
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
-        in_memory: Arc<AtomicU64>,
+        in_memory: HeartbeatMetricType,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -359,7 +408,14 @@ impl Counter {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(value, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(value, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(_) => {
+                    dbg_panic!("No in memory metric should use labels today");
+                }
+            }
         }
     }
 
@@ -384,7 +440,14 @@ impl CounterBase for Counter {
         bound.adds(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(value, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(value, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(_) => {
+                    dbg_panic!("No in memory metric should use labels today");
+                }
+            }
         }
     }
 }
@@ -399,13 +462,10 @@ impl MetricAttributable<Counter> for Counter {
             bound_cache: OnceLock::new(),
         };
 
-        let in_memory = if let Some(ref in_mem) = self.in_memory {
-            Some(in_mem.clone())
-        } else {
-            None
-        };
-
-        Ok(Counter { primary, in_memory })
+        Ok(Counter {
+            primary,
+            in_memory: self.in_memory.clone(),
+        })
     }
 }
 
@@ -527,7 +587,7 @@ pub struct HistogramDuration {
         Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
         Arc<dyn HistogramDurationBase>,
     >,
-    in_memory: Option<Arc<AtomicU64>>,
+    in_memory: Option<HeartbeatMetricType>,
 }
 impl HistogramDuration {
     pub fn new(
@@ -544,7 +604,7 @@ impl HistogramDuration {
     }
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
-        in_memory: Arc<AtomicU64>,
+        in_memory: HeartbeatMetricType,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -566,7 +626,14 @@ impl HistogramDuration {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(1, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(1, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(_) => {
+                    dbg_panic!("No in memory HistogramDuration should use labels today");
+                }
+            }
         }
     }
 
@@ -589,7 +656,14 @@ impl HistogramDurationBase for HistogramDuration {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(1, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(1, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(_) => {
+                    dbg_panic!("No in memory HistogramDuration should use labels today");
+                }
+            }
         }
     }
 }
@@ -621,7 +695,7 @@ pub struct Gauge {
         Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
         Arc<dyn GaugeBase>,
     >,
-    in_memory: Option<Arc<AtomicU64>>,
+    in_memory: Option<HeartbeatMetricType>,
 }
 impl Gauge {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>) -> Self {
@@ -637,7 +711,7 @@ impl Gauge {
 
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
-        in_memory: Arc<AtomicU64>,
+        in_memory: HeartbeatMetricType,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -659,7 +733,14 @@ impl Gauge {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(value, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(value, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(_) => {
+                    dbg_panic!("No in memory Gauge should use labels today");
+                }
+            }
         }
     }
 
@@ -682,7 +763,28 @@ impl GaugeBase for Gauge {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            in_mem.fetch_add(value, Ordering::Relaxed);
+            match in_mem {
+                HeartbeatMetricType::Regular(metric) => {
+                    metric.fetch_add(value, Ordering::Relaxed);
+                }
+                HeartbeatMetricType::WithLabel(metrics) => match self.primary.attributes.clone() {
+                    MetricAttributes::OTel { kvs } => {
+                        for val in kvs.iter() {
+                            if val.key.as_str() == "poller_type" {
+                                println!("FOUND POLLER_TYPE {:?}", val.value);
+                                let _ = metrics.get(&val.value.to_string()).map(|metric| {
+                                    metric.fetch_add(value, Ordering::Relaxed);
+                                    println!("\tAdded {value}");
+                                });
+                            }
+                        }
+                    }
+                    MetricAttributes::Prometheus { labels } => (),
+                    _ => {
+                        println!("TODO non-otel/prometheus attributes:")
+                    }
+                },
+            }
         }
     }
 }
@@ -697,13 +799,10 @@ impl MetricAttributable<Gauge> for Gauge {
             bound_cache: OnceLock::new(),
         };
 
-        let in_memory = if let Some(ref in_mem) = self.in_memory {
-            Some(in_mem.clone())
-        } else {
-            None
-        };
-
-        Ok(Gauge { primary, in_memory })
+        Ok(Gauge {
+            primary,
+            in_memory: self.in_memory.clone(),
+        })
     }
 }
 
