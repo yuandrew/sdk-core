@@ -1,4 +1,5 @@
 use crate::dbg_panic;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     any::Any,
     borrow::Cow,
@@ -31,15 +32,11 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn counter_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_meter: &dyn CoreMeter,
+        in_memory_counter: Arc<AtomicU64>,
     ) -> Counter {
         let primary_counter = self.counter(params.clone());
-        let in_memory_counter = in_memory_meter.counter(params);
 
-        Counter::new_with_in_memory(
-            primary_counter.primary.metric.clone(),
-            in_memory_counter.primary.metric.clone(),
-        )
+        Counter::new_with_in_memory(primary_counter.primary.metric.clone(), in_memory_counter)
     }
 
     fn histogram(&self, params: MetricParameters) -> Histogram;
@@ -53,15 +50,11 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn histogram_duration_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_meter: &dyn CoreMeter,
+        in_memory_hist: Arc<AtomicU64>,
     ) -> HistogramDuration {
         let primary_hist = self.histogram_duration(params.clone());
-        let in_memory_hist = in_memory_meter.histogram_duration(params);
 
-        HistogramDuration::new_with_in_memory(
-            primary_hist.primary.metric.clone(),
-            in_memory_hist.primary.metric.clone(),
-        )
+        HistogramDuration::new_with_in_memory(primary_hist.primary.metric.clone(), in_memory_hist)
     }
     fn gauge(&self, params: MetricParameters) -> Gauge;
 
@@ -69,18 +62,63 @@ pub trait CoreMeter: Send + Sync + Debug {
     fn gauge_with_in_memory(
         &self,
         params: MetricParameters,
-        in_memory_meter: &dyn CoreMeter,
+        in_memory_gauge: Arc<AtomicU64>,
     ) -> Gauge {
         let primary_gauge = self.gauge(params.clone());
-        let in_memory_gauge = in_memory_meter.gauge(params);
+        // TODO: This one uses
 
-        Gauge::new_with_in_memory(
-            primary_gauge.primary.metric.clone(),
-            in_memory_gauge.primary.metric.clone(),
-        )
+        Gauge::new_with_in_memory(primary_gauge.primary.metric.clone(), in_memory_gauge)
     }
 
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64;
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics>;
+}
+
+#[derive(Default, Debug)]
+pub struct WorkerHeartbeatMetrics {
+    pub sticky_cache_size: Arc<AtomicU64>,
+    pub total_sticky_cache_hit: Arc<AtomicU64>,
+    pub total_sticky_cache_miss: Arc<AtomicU64>,
+    pub wft_current_pollers: Arc<AtomicU64>,
+    pub sticky_wft_current_pollers: Arc<AtomicU64>,
+    pub activity_current_pollers: Arc<AtomicU64>,
+    pub nexus_current_pollers: Arc<AtomicU64>,
+    pub workflow_task_execution_failed: Arc<AtomicU64>,
+    pub activity_execution_failed: Arc<AtomicU64>,
+    pub nexus_task_execution_failed: Arc<AtomicU64>,
+    pub local_activity_execution_failed: Arc<AtomicU64>,
+    pub activity_execution_latency: Arc<AtomicU64>,
+    pub local_activity_execution_latency: Arc<AtomicU64>,
+    pub workflow_task_execution_latency: Arc<AtomicU64>,
+    pub nexus_task_execution_latency: Arc<AtomicU64>,
+}
+
+impl WorkerHeartbeatMetrics {
+    pub fn get_metric(&self, name: &str) -> Option<Arc<AtomicU64>> {
+        match name {
+            "sticky_cache_size" => Some(self.sticky_cache_size.clone()),
+            "sticky_cache_hit" => Some(self.total_sticky_cache_hit.clone()),
+            "sticky_cache_miss" => Some(self.total_sticky_cache_miss.clone()),
+            // TODO: need to look up "num_pollers" metric with poller_type==workflow_task
+            "num_pollers" => Some(self.wft_current_pollers.clone()),
+            "sticky_wft_current_pollers" => Some(self.sticky_wft_current_pollers.clone()),
+            "activity_current_pollers" => Some(self.activity_current_pollers.clone()),
+            "nexus_current_pollers" => Some(self.nexus_current_pollers.clone()),
+
+            "workflow_task_execution_failed" => Some(self.workflow_task_execution_failed.clone()),
+            "activity_execution_failed" => Some(self.activity_execution_failed.clone()),
+            "nexus_task_execution_failed" => Some(self.nexus_task_execution_failed.clone()),
+            "local_activity_execution_failed" => Some(self.local_activity_execution_failed.clone()),
+            "activity_execution_latency" => Some(self.activity_execution_latency.clone()),
+            "local_activity_execution_latency" => {
+                Some(self.local_activity_execution_latency.clone())
+            }
+            "workflow_task_execution_latency" => Some(self.workflow_task_execution_latency.clone()),
+            "nexus_task_execution_latency" => Some(self.nexus_task_execution_latency.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, derive_builder::Builder)]
@@ -153,6 +191,10 @@ impl CoreMeter for Arc<dyn CoreMeter> {
 
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64 {
         self.as_ref().gauge_f64(params)
+    }
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics> {
+        self.as_ref().in_memory_metrics()
     }
 }
 
@@ -280,12 +322,7 @@ pub struct Counter {
         Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
         Arc<dyn CounterBase>,
     >,
-    in_memory: Option<
-        LazyBoundMetric<
-            Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
-            Arc<dyn CounterBase>,
-        >,
-    >,
+    in_memory: Option<Arc<AtomicU64>>,
 }
 impl Counter {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>) -> Self {
@@ -301,7 +338,7 @@ impl Counter {
 
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
-        in_memory: Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+        in_memory: Arc<AtomicU64>,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -309,11 +346,7 @@ impl Counter {
                 attributes: MetricAttributes::Empty,
                 bound_cache: OnceLock::new(),
             },
-            in_memory: Some(LazyBoundMetric {
-                metric: in_memory,
-                attributes: MetricAttributes::Empty,
-                bound_cache: OnceLock::new(),
-            }),
+            in_memory: Some(in_memory),
         }
     }
 
@@ -326,21 +359,12 @@ impl Counter {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem.metric.with_attributes(attributes) {
-                Ok(base) => base.adds(value),
-                Err(e) => {
-                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
-                }
-            }
+            in_mem.fetch_add(value, Ordering::Relaxed);
         }
     }
 
     pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
         self.primary.update_attributes(new_attributes.clone());
-
-        if let Some(ref mut in_mem) = self.in_memory {
-            in_mem.update_attributes(new_attributes);
-        }
     }
 }
 impl CounterBase for Counter {
@@ -360,20 +384,7 @@ impl CounterBase for Counter {
         bound.adds(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            let bound = in_mem.bound_cache.get_or_init(|| {
-                in_mem
-                    .metric
-                    .with_attributes(&in_mem.attributes)
-                    .map(Into::into)
-                    .unwrap_or_else(|e| {
-                        dbg_panic!(
-                            "Failed to initialize in-memory metric, will drop values: {e:?}"
-                        );
-                        Arc::new(NoOpInstrument) as Arc<dyn CounterBase>
-                    })
-            });
-            println!("bound");
-            bound.adds(value);
+            in_mem.fetch_add(value, Ordering::Relaxed);
         }
     }
 }
@@ -389,11 +400,7 @@ impl MetricAttributable<Counter> for Counter {
         };
 
         let in_memory = if let Some(ref in_mem) = self.in_memory {
-            Some(LazyBoundMetric {
-                metric: in_mem.metric.clone(),
-                attributes: attributes.clone(),
-                bound_cache: OnceLock::new(),
-            })
+            Some(in_mem.clone())
         } else {
             None
         };
@@ -520,12 +527,7 @@ pub struct HistogramDuration {
         Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
         Arc<dyn HistogramDurationBase>,
     >,
-    in_memory: Option<
-        LazyBoundMetric<
-            Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
-            Arc<dyn HistogramDurationBase>,
-        >,
-    >,
+    in_memory: Option<Arc<AtomicU64>>,
 }
 impl HistogramDuration {
     pub fn new(
@@ -542,7 +544,7 @@ impl HistogramDuration {
     }
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
-        in_memory: Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+        in_memory: Arc<AtomicU64>,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -550,11 +552,7 @@ impl HistogramDuration {
                 attributes: MetricAttributes::Empty,
                 bound_cache: OnceLock::new(),
             },
-            in_memory: Some(LazyBoundMetric {
-                metric: in_memory,
-                attributes: MetricAttributes::Empty,
-                bound_cache: OnceLock::new(),
-            }),
+            in_memory: Some(in_memory),
         }
     }
     pub fn record(&self, value: Duration, attributes: &MetricAttributes) {
@@ -568,23 +566,12 @@ impl HistogramDuration {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem.metric.with_attributes(attributes) {
-                Ok(base) => {
-                    base.records(value);
-                }
-                Err(e) => {
-                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}",);
-                }
-            }
+            in_mem.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
         self.primary.update_attributes(new_attributes.clone());
-
-        if let Some(ref mut in_mem) = self.in_memory {
-            in_mem.update_attributes(new_attributes);
-        }
     }
 }
 impl HistogramDurationBase for HistogramDuration {
@@ -602,19 +589,7 @@ impl HistogramDurationBase for HistogramDuration {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            let bound = in_mem.bound_cache.get_or_init(|| {
-                in_mem
-                    .metric
-                    .with_attributes(&in_mem.attributes)
-                    .map(Into::into)
-                    .unwrap_or_else(|e| {
-                        dbg_panic!(
-                            "Failed to initialize in-memory metric, will drop values: {e:?}"
-                        );
-                        Arc::new(NoOpInstrument) as Arc<dyn HistogramDurationBase>
-                    })
-            });
-            bound.records(value);
+            in_mem.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -629,17 +604,10 @@ impl MetricAttributable<HistogramDuration> for HistogramDuration {
             bound_cache: OnceLock::new(),
         };
 
-        let in_memory = if let Some(ref in_mem) = self.in_memory {
-            Some(LazyBoundMetric {
-                metric: in_mem.metric.clone(),
-                attributes: attributes.clone(),
-                bound_cache: OnceLock::new(),
-            })
-        } else {
-            None
-        };
-
-        Ok(HistogramDuration { primary, in_memory })
+        Ok(HistogramDuration {
+            primary,
+            in_memory: self.in_memory.clone(),
+        })
     }
 }
 
@@ -653,12 +621,7 @@ pub struct Gauge {
         Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
         Arc<dyn GaugeBase>,
     >,
-    in_memory: Option<
-        LazyBoundMetric<
-            Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
-            Arc<dyn GaugeBase>,
-        >,
-    >,
+    in_memory: Option<Arc<AtomicU64>>,
 }
 impl Gauge {
     pub fn new(inner: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>) -> Self {
@@ -674,7 +637,7 @@ impl Gauge {
 
     pub fn new_with_in_memory(
         primary: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
-        in_memory: Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+        in_memory: Arc<AtomicU64>,
     ) -> Self {
         Self {
             primary: LazyBoundMetric {
@@ -682,15 +645,12 @@ impl Gauge {
                 attributes: MetricAttributes::Empty,
                 bound_cache: OnceLock::new(),
             },
-            in_memory: Some(LazyBoundMetric {
-                metric: in_memory,
-                attributes: MetricAttributes::Empty,
-                bound_cache: OnceLock::new(),
-            }),
+            in_memory: Some(in_memory),
         }
     }
 
     pub fn record(&self, value: u64, attributes: &MetricAttributes) {
+        println!("Gauge::record(): {value}, {attributes:?}");
         match self.primary.metric.with_attributes(attributes) {
             Ok(base) => base.records(value),
             Err(e) => {
@@ -699,21 +659,12 @@ impl Gauge {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem.metric.with_attributes(attributes) {
-                Ok(base) => base.records(value),
-                Err(e) => {
-                    dbg_panic!("Failed to initialize in-memory metric, will drop values: {e:?}");
-                }
-            }
+            in_mem.fetch_add(value, Ordering::Relaxed);
         }
     }
 
     pub fn update_attributes(&mut self, new_attributes: MetricAttributes) {
         self.primary.update_attributes(new_attributes.clone());
-
-        if let Some(ref mut in_mem) = self.in_memory {
-            in_mem.update_attributes(new_attributes);
-        }
     }
 }
 impl GaugeBase for Gauge {
@@ -731,19 +682,7 @@ impl GaugeBase for Gauge {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            let bound = in_mem.bound_cache.get_or_init(|| {
-                in_mem
-                    .metric
-                    .with_attributes(&in_mem.attributes)
-                    .map(Into::into)
-                    .unwrap_or_else(|e| {
-                        dbg_panic!(
-                            "Failed to initialize in-memory metric, will drop values: {e:?}"
-                        );
-                        Arc::new(NoOpInstrument) as Arc<dyn GaugeBase>
-                    })
-            });
-            bound.records(value);
+            in_mem.fetch_add(value, Ordering::Relaxed);
         }
     }
 }
@@ -759,11 +698,7 @@ impl MetricAttributable<Gauge> for Gauge {
         };
 
         let in_memory = if let Some(ref in_mem) = self.in_memory {
-            Some(LazyBoundMetric {
-                metric: in_mem.metric.clone(),
-                attributes: attributes.clone(),
-                bound_cache: OnceLock::new(),
-            })
+            Some(in_mem.clone())
         } else {
             None
         };
@@ -940,6 +875,10 @@ impl CoreMeter for NoOpCoreMeter {
 
     fn gauge_f64(&self, _: MetricParameters) -> GaugeF64 {
         GaugeF64::new(Arc::new(NoOpInstrument))
+    }
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics> {
+        Arc::new(WorkerHeartbeatMetrics::default())
     }
 }
 

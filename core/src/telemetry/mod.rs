@@ -27,16 +27,11 @@ pub use otel::build_otlp_metric_exporter;
 #[cfg(feature = "prom")]
 pub use prometheus_server::start_prometheus_metric_exporter;
 
-// TODO: Clean up?
-#[cfg(feature = "otel")]
-pub use in_memory::InMemoryMeter;
-
 pub use log_export::{CoreLogBuffer, CoreLogBufferedConsumer, CoreLogStreamConsumer};
 
 use crate::telemetry::{log_export::CoreLogConsumerLayer, metrics::PrefixedMetricsMeter};
 use itertools::Itertools;
 use parking_lot::Mutex;
-use std::fmt::Debug;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -46,6 +41,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+pub(crate) use temporal_sdk_core_api::telemetry::metrics::WorkerHeartbeatMetrics;
 use temporal_sdk_core_api::telemetry::{
     CoreLog, CoreTelemetry, Logger, TelemetryOptions, TelemetryOptionsBuilder,
     metrics::{CoreMeter, MetricKeyValue, NewAttributes, TemporalMeter},
@@ -74,7 +70,7 @@ pub struct TelemetryInstance {
     /// the user has not opted into any tracing configuration.
     trace_subscriber: Option<Arc<dyn Subscriber + Send + Sync>>,
     attach_service_name: bool,
-    in_memory_meter: Option<Arc<InMemoryMeter>>,
+    in_memory_metrics: Option<Arc<WorkerHeartbeatMetrics>>, // TODO: Should this even be option?
 }
 
 impl TelemetryInstance {
@@ -91,7 +87,7 @@ impl TelemetryInstance {
             metrics,
             trace_subscriber,
             attach_service_name,
-            in_memory_meter: None,
+            in_memory_metrics: None,
         }
     }
 
@@ -104,8 +100,8 @@ impl TelemetryInstance {
 
     /// Some metric meters cannot be initialized until after a tokio runtime has started and after
     /// other telemetry has initted (ex: prometheus). They can be attached here.
-    pub fn attach_late_init_metrics(&mut self, meter: Arc<dyn CoreMeterWithMem + 'static>) {
-        self.in_memory_meter = Some(meter.in_memory_meter().clone());
+    pub fn attach_late_init_metrics(&mut self, meter: Arc<dyn CoreMeter + 'static>) {
+        self.in_memory_metrics = Some(meter.in_memory_metrics().clone());
         self.metrics = Some(meter);
     }
 
@@ -141,9 +137,9 @@ impl TelemetryInstance {
         }
     }
 
-    /// Returns an in memory meter, used to query metric state for worker heartbeating.
-    pub fn in_memory_meter(&self) -> Option<Arc<InMemoryMeter>> {
-        self.in_memory_meter.clone()
+    /// Returns all in memory metrics, used for worker heartbeating.
+    pub fn in_memory_metrics(&self) -> Option<Arc<WorkerHeartbeatMetrics>> {
+        self.in_memory_metrics.clone()
     }
 }
 
@@ -319,11 +315,4 @@ where
     fn display(&self) -> String {
         format!("[{}]", self.iter().format(","))
     }
-}
-
-// TODO: Can we remove this and just add this to CoreMeter?
-/// Adds in memory support for [CoreMeter] traits, used for worker heartbeating.
-pub trait CoreMeterWithMem: CoreMeter + Send + Sync + Debug {
-    /// Returns an in memory meter, used to query metric state for worker heartbeating.
-    fn in_memory_meter(&self) -> Arc<InMemoryMeter>;
 }

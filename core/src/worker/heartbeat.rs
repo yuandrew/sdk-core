@@ -54,7 +54,6 @@ impl SharedNamespaceWorker {
             TaskPollers::Real,
             telemetry,
             None,
-            None,
             true,
         )?;
 

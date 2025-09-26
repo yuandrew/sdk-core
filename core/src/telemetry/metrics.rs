@@ -2,7 +2,6 @@
 use crate::TelemetryInstance;
 use crate::abstractions::dbg_panic;
 
-use crate::telemetry::in_memory::InMemoryMeter;
 use std::{
     fmt::{Debug, Display},
     iter::Iterator,
@@ -14,7 +13,7 @@ use temporal_sdk_core_api::telemetry::metrics::{
     GaugeF64, GaugeF64Base, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase,
     HistogramF64, HistogramF64Base, LazyBufferInstrument, MetricAttributable, MetricAttributes,
     MetricCallBufferer, MetricEvent, MetricKeyValue, MetricKind, MetricParameters, MetricUpdateVal,
-    NewAttributes, NoOpCoreMeter, TemporalMeter,
+    NewAttributes, NoOpCoreMeter, TemporalMeter, WorkerHeartbeatMetrics,
 };
 use temporal_sdk_core_protos::temporal::api::{
     enums::v1::WorkflowTaskFailedCause, failure::v1::Failure,
@@ -86,7 +85,7 @@ impl MetricsContext {
             namespace,
             tq,
             telemetry.get_temporal_metric_meter(),
-            telemetry.in_memory_meter(),
+            telemetry.in_memory_metrics(),
         )
     }
 
@@ -94,7 +93,7 @@ impl MetricsContext {
         namespace: String,
         tq: String,
         temporal_meter: Option<TemporalMeter>,
-        in_memory_meter: Option<Arc<InMemoryMeter>>,
+        in_memory_meter: Option<Arc<WorkerHeartbeatMetrics>>,
     ) -> Self {
         if let Some(mut meter) = temporal_meter {
             meter
@@ -103,10 +102,7 @@ impl MetricsContext {
                 .push(MetricKeyValue::new(KEY_NAMESPACE, namespace));
             meter.default_attribs.attributes.push(task_queue(tq));
             let kvs = meter.inner.new_attributes(meter.default_attribs);
-            let mut instruments = Instruments::new(
-                meter.inner.as_ref(),
-                in_memory_meter.as_deref().map(|m| m as &dyn CoreMeter),
-            );
+            let mut instruments = Instruments::new(meter.inner.as_ref(), in_memory_meter);
             instruments.update_attributes(&kvs);
             Self {
                 kvs,
@@ -139,6 +135,7 @@ impl MetricsContext {
     pub(crate) fn wf_tq_poll_ok(&self) {
         // TODO: add mechanism for taking timestamp
         println!("wf_tq_poll_ok");
+        // TODO: increment the WorkerHeartbeatMetrics metric too
         self.instruments.wf_task_queue_poll_succeed_counter.adds(1);
     }
 
@@ -314,25 +311,37 @@ impl MetricsContext {
 }
 
 impl Instruments {
-    fn new(meter: &dyn CoreMeter, in_mem_meter: Option<&dyn CoreMeter>) -> Self {
+    fn new(meter: &dyn CoreMeter, in_memory: Option<Arc<WorkerHeartbeatMetrics>>) -> Self {
         let create_counter = |params: MetricParameters| -> Counter {
-            match in_mem_meter {
-                Some(in_mem) => meter.counter_with_in_memory(params, in_mem),
-                None => meter.counter(params),
+            if let Some(in_mem) = in_memory.clone()
+                && let Some(metric) = in_mem.get_metric(&params.name)
+            {
+                meter.counter_with_in_memory(params, metric)
+            } else {
+                meter.counter(params)
             }
         };
 
         let create_gauge = |params: MetricParameters| -> Gauge {
-            match in_mem_meter {
-                Some(in_mem) => meter.gauge_with_in_memory(params, in_mem),
-                None => meter.gauge(params),
+            println!("params.name {:?}", params.name);
+            if let Some(in_mem) = in_memory.clone()
+                && let Some(metric) = in_mem.get_metric(&params.name)
+            {
+                println!("a");
+                meter.gauge_with_in_memory(params, metric)
+            } else {
+                println!("b");
+                meter.gauge(params)
             }
         };
 
         let create_histogram_duration = |params: MetricParameters| -> HistogramDuration {
-            match in_mem_meter {
-                Some(in_mem) => meter.histogram_duration_with_in_memory(params, in_mem),
-                None => meter.histogram_duration(params),
+            if let Some(in_mem) = in_memory.clone()
+                && let Some(metric) = in_mem.get_metric(&params.name)
+            {
+                meter.histogram_duration_with_in_memory(params, metric)
+            } else {
+                meter.histogram_duration(params)
             }
         };
 
@@ -883,6 +892,10 @@ where
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64 {
         GaugeF64::new(Arc::new(self.new_instrument(params, MetricKind::Gauge)))
     }
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics> {
+        todo!()
+    }
 }
 impl<I> MetricCallBufferer<I> for MetricsCallBuffer<I>
 where
@@ -1111,6 +1124,10 @@ impl<CM: CoreMeter> CoreMeter for PrefixedMetricsMeter<CM> {
     fn gauge_f64(&self, mut params: MetricParameters) -> GaugeF64 {
         params.name = (self.prefix.clone() + &*params.name).into();
         self.meter.gauge_f64(params)
+    }
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics> {
+        self.meter.in_memory_metrics()
     }
 }
 

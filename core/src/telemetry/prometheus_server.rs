@@ -26,6 +26,7 @@ pub struct StartedPromServer {
 pub fn start_prometheus_metric_exporter(
     opts: PrometheusExporterOptions,
 ) -> Result<StartedPromServer, anyhow::Error> {
+    // TODO: in memory meter, WorkerHeartbeatMetrics
     let srv = PromServer::new(&opts)?;
     let meter = Arc::new(
         crate::telemetry::prometheus_meter::CorePrometheusMeter::new(

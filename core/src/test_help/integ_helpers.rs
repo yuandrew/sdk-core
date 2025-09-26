@@ -203,7 +203,6 @@ pub fn mock_worker(mocks: MocksHolder) -> Worker {
         },
         None,
         None,
-        None,
         false,
     )
     .unwrap()

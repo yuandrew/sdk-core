@@ -16,6 +16,7 @@ use temporal_sdk_core_api::telemetry::metrics::{
     CoreMeter, Counter, CounterBase, Gauge, GaugeBase, GaugeF64, GaugeF64Base, Histogram,
     HistogramBase, HistogramDuration, HistogramDurationBase, HistogramF64, HistogramF64Base,
     MetricAttributable, MetricAttributes, MetricParameters, NewAttributes, OrderedPromLabelSet,
+    WorkerHeartbeatMetrics,
 };
 
 #[derive(derive_more::From, derive_more::TryInto, Debug, Clone)]
@@ -460,6 +461,7 @@ pub struct CorePrometheusMeter {
     use_seconds_for_durations: bool,
     unit_suffix: bool,
     bucket_overrides: temporal_sdk_core_api::telemetry::HistogramBucketOverrides,
+    pub in_memory_metrics: Arc<WorkerHeartbeatMetrics>,
 }
 
 impl CorePrometheusMeter {
@@ -474,6 +476,7 @@ impl CorePrometheusMeter {
             use_seconds_for_durations,
             unit_suffix,
             bucket_overrides,
+            in_memory_metrics: Arc::new(WorkerHeartbeatMetrics::default()),
         }
     }
 
@@ -576,6 +579,10 @@ impl CoreMeter for CorePrometheusMeter {
             params.description.to_string(),
             self.registry.clone(),
         )))
+    }
+
+    fn in_memory_metrics(&self) -> Arc<WorkerHeartbeatMetrics> {
+        self.in_memory_metrics.clone()
     }
 }
 
