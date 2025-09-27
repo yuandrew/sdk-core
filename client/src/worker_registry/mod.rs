@@ -206,20 +206,21 @@ impl ClientWorkerSet {
             .try_reserve_wft_slot(namespace, task_queue)
     }
 
+    /// Register a local worker that can provide WFT processing slots and potentially worker heartbeating.
+    pub fn register_worker(
+        &self,
+        worker: Arc<dyn ClientWorker + Send + Sync>,
+    ) -> Result<(), anyhow::Error> {
+        println!("register_worker");
+        self.worker_manager.write().register(worker)
+    }
+
     /// Unregisters a local worker, typically when that worker starts shutdown.
     pub fn unregister_worker(
         &self,
         worker_instance_key: Uuid,
     ) -> Result<Arc<dyn ClientWorker + Send + Sync>, anyhow::Error> {
         self.worker_manager.write().unregister(worker_instance_key)
-    }
-
-    /// Register a local worker that can provide WFT processing slots and potentially worker heartbeating.
-    pub fn register_worker(
-        &self,
-        worker: Arc<dyn ClientWorker + Send + Sync>,
-    ) -> Result<(), anyhow::Error> {
-        self.worker_manager.write().register(worker)
     }
 
     /// Returns the worker grouping key, which is unique for each worker.

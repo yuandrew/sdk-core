@@ -79,6 +79,18 @@ pub enum HeartbeatMetricType {
     WithLabel(HashMap<String, Arc<AtomicU64>>),
 }
 
+fn label_value_from_attributes(attributes: &MetricAttributes, key: &str) -> Option<String> {
+    match attributes {
+        MetricAttributes::Prometheus { labels } => labels.as_prom_labels().get(key).cloned(),
+        #[cfg(feature = "otel_impls")]
+        MetricAttributes::OTel { kvs } => kvs
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct NumPollersMetric {
     pub wft_current_pollers: Arc<AtomicU64>,
@@ -437,7 +449,6 @@ impl CounterBase for Counter {
         bound.adds(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            println!("self.primary.attributes {:?}", self.primary.attributes);
             match in_mem {
                 HeartbeatMetricType::Regular(metric) => {
                     metric.fetch_add(value, Ordering::Relaxed);
@@ -726,7 +737,6 @@ impl Gauge {
     }
 
     pub fn record(&self, value: u64, attributes: &MetricAttributes) {
-        println!("Gauge::record(): {value}, {attributes:?}");
         match self.primary.metric.with_attributes(attributes) {
             Ok(base) => base.records(value),
             Err(e) => {
@@ -737,10 +747,16 @@ impl Gauge {
         if let Some(ref in_mem) = self.in_memory {
             match in_mem {
                 HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(value, Ordering::Relaxed);
+                    metric.store(value, Ordering::Relaxed);
                 }
-                HeartbeatMetricType::WithLabel(_) => {
-                    dbg_panic!("No in memory Gauge should use labels today");
+                HeartbeatMetricType::WithLabel(metrics) => {
+                    if let Some(label_value) =
+                        label_value_from_attributes(attributes, "poller_type")
+                    {
+                        if let Some(metric) = metrics.get(&label_value) {
+                            metric.store(value, Ordering::Relaxed);
+                        }
+                    }
                 }
             }
         }
@@ -767,23 +783,17 @@ impl GaugeBase for Gauge {
         if let Some(ref in_mem) = self.in_memory {
             match in_mem {
                 HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(value, Ordering::Relaxed);
+                    metric.store(value, Ordering::Relaxed);
                 }
-                HeartbeatMetricType::WithLabel(metrics) => match self.primary.attributes.clone() {
-                    MetricAttributes::OTel { kvs } => {
-                        for val in kvs.iter() {
-                            if val.key.as_str() == "poller_type" {
-                                let _ = metrics.get(&val.value.to_string()).map(|metric| {
-                                    metric.fetch_add(value, Ordering::Relaxed);
-                                });
-                            }
+                HeartbeatMetricType::WithLabel(metrics) => {
+                    if let Some(label_value) =
+                        label_value_from_attributes(&self.primary.attributes, "poller_type")
+                    {
+                        if let Some(metric) = metrics.get(&label_value) {
+                            metric.store(value, Ordering::Relaxed);
                         }
                     }
-                    MetricAttributes::Prometheus { labels } => (),
-                    _ => {
-                        println!("TODO non-otel/prometheus attributes:")
-                    }
-                },
+                }
             }
         }
     }

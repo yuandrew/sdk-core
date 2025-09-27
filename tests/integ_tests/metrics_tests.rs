@@ -22,6 +22,7 @@ use temporal_sdk::{
     ActContext, ActivityError, ActivityOptions, CancellableFuture, LocalActivityOptions,
     NexusOperationOptions, WfContext,
 };
+use temporal_sdk_core::telemetry::start_prometheus_metric_exporter;
 use temporal_sdk_core::{
     CoreRuntime, FixedSizeSlotSupplier, RuntimeOptionsBuilder, TokioRuntimeBuilder, TunerBuilder,
     init_worker,
@@ -73,7 +74,6 @@ use temporal_sdk_core_protos::{
 };
 use tokio::{join, sync::Barrier};
 use url::Url;
-use temporal_sdk_core::telemetry::start_prometheus_metric_exporter;
 
 pub(crate) async fn get_text(endpoint: String) -> String {
     reqwest::get(endpoint).await.unwrap().text().await.unwrap()
@@ -1330,38 +1330,54 @@ async fn prometheus_label_nonsense() {
     assert!(body.contains("some_counter{blerp=\"baz\"} 2"));
 }
 
+// Tests that rely on Prometheus running in a docker container need to start
+// with `docker_` and set the `DOCKER_PROMETHEUS_RUNNING` env variable to run
+#[rstest::rstest]
 #[tokio::test]
-async fn runtime_new_otel() {
+async fn docker_worker_heartbeat_basic(#[values("otel", "prom")] backing: &str) {
     let runtimeopts = RuntimeOptionsBuilder::default()
         .telemetry_options(get_integ_telem_options())
         .heartbeat_interval(Some(Duration::from_millis(100)))
         .build()
         .unwrap();
-    let mut rt = CoreRuntime::new(runtimeopts, TokioRuntimeBuilder::default()).unwrap();
-    let handle = rt.tokio_handle();
-    let _rt = handle.enter();
-    // Otel exporter
-    let url = Some("grpc://localhost:4317")
-        .map(|x| x.parse::<Url>().unwrap())
-        .unwrap();
-    let mut opts_build = OtelCollectorOptionsBuilder::default();
-    let opts = opts_build.url(url).build().unwrap();
-    // If wanna add more options: https://github.com/temporalio/sdk-ruby/blob/143e421d82d16e58bd45226998363d55e4bc3bbb/temporalio/ext/src/runtime.rs#L113C21-L135C22
+    let mut rt = CoreRuntime::new_assume_tokio(runtimeopts).unwrap();
+    match backing {
+        "otel" => {
+            let url = Some("grpc://localhost:4317")
+                .map(|x| x.parse::<Url>().unwrap())
+                .unwrap();
+            let mut opts_build = OtelCollectorOptionsBuilder::default();
+            let opts = opts_build.url(url).build().unwrap();
+            // If wanna add more options: https://github.com/temporalio/sdk-ruby/blob/143e421d82d16e58bd45226998363d55e4bc3bbb/temporalio/ext/src/runtime.rs#L113C21-L135C22
 
-    rt.telemetry_mut()
-        .attach_late_init_metrics(Arc::new(build_otlp_metric_exporter(opts).unwrap()));
-
+            rt.telemetry_mut()
+                .attach_late_init_metrics(Arc::new(build_otlp_metric_exporter(opts).unwrap()));
+        }
+        "prom" => {
+            let mut opts_build = PrometheusExporterOptionsBuilder::default();
+            opts_build.socket_addr(ANY_PORT.parse().unwrap());
+            let opts = opts_build.build().unwrap();
+            rt.telemetry_mut()
+                .attach_late_init_metrics(start_prometheus_metric_exporter(opts).unwrap().meter);
+        }
+        _ => unreachable!(),
+    }
     let wf_name = "runtime_new_otel";
     let mut starter = CoreWfStarter::new_with_runtime(wf_name, rt);
-    starter.worker_config.max_cached_workflows(5_usize);
+    starter
+        .worker_config
+        .max_outstanding_workflow_tasks(5_usize)
+        .max_cached_workflows(5_usize)
+        .max_outstanding_activities(5_usize);
     let mut worker = starter.worker().await;
+    let worker_instance_key = worker.worker_instance_key();
 
     // Run a workflow
     worker.register_wf(wf_name.to_string(), |ctx: WfContext| async move {
         ctx.activity(ActivityOptions {
             activity_type: "pass_fail_act".to_string(),
             input: "pass".as_json_payload().expect("serializes fine"),
-            start_to_close_timeout: Some(Duration::from_secs(5)),
+            start_to_close_timeout: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .await;
@@ -1369,14 +1385,12 @@ async fn runtime_new_otel() {
     });
     worker.register_activity("pass_fail_act", |_ctx: ActContext, i: String| async move {
         println!("STARTING ACTIVITY");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        return Ok(i);
+        Ok(i)
     });
 
-    println!("[run] 1st");
     starter.start_with_worker(wf_name, &mut worker).await;
 
-    // for i in 0..5 {
+    // for i in 1..5 {
     //     worker.submit_wf(
     //         format!("{wf_name}-{i}"),
     //         wf_name,
@@ -1388,65 +1402,26 @@ async fn runtime_new_otel() {
     // }
     worker.run_until_done().await.unwrap();
 
-    // TODO: add some asserts to ensure data shows up
-}
+    // TODO: clone_no_worker() for new worker
 
-#[tokio::test]
-async fn runtime_new_prom() {
-    let runtimeopts = RuntimeOptionsBuilder::default()
-        .telemetry_options(get_integ_telem_options())
-        .heartbeat_interval(Some(Duration::from_millis(100)))
-        .build()
+    // TODO: ListWorkers
+    let client = starter.get_client().await;
+    let workers_list = client
+        .list_workers(100, Vec::new(), String::new())
+        .await
         .unwrap();
-    let mut rt = CoreRuntime::new(runtimeopts, TokioRuntimeBuilder::default()).unwrap();
-    let handle = rt.tokio_handle();
-    let _rt = handle.enter();
-    // Prom exporter
-    let url = Some("grpc://localhost:4317")
-        .map(|x| x.parse::<Url>().unwrap())
-        .unwrap();
-    let mut opts_build = PrometheusExporterOptionsBuilder::default();
-    // opts_build.socket_addr(ANY_PORT.parse().unwrap());
-    let opts = opts_build.url(url).build().unwrap();
-    // If wanna add more options: https://github.com/temporalio/sdk-ruby/blob/143e421d82d16e58bd45226998363d55e4bc3bbb/temporalio/ext/src/runtime.rs#L113C21-L135C22
-    rt.telemetry_mut().attach_late_init_metrics(start_prometheus_metric_exporter(opts).unwrap().meter);
+    // println!("workers_list: {workers_list:#?}");
 
-    let wf_name = "runtime_new_otel";
-    let mut starter = CoreWfStarter::new_with_runtime(wf_name, rt);
-    starter.worker_config.max_cached_workflows(5_usize);
-    let mut worker = starter.worker().await;
-
-    // Run a workflow
-    worker.register_wf(wf_name.to_string(), |ctx: WfContext| async move {
-        ctx.activity(ActivityOptions {
-            activity_type: "pass_fail_act".to_string(),
-            input: "pass".as_json_payload().expect("serializes fine"),
-            start_to_close_timeout: Some(Duration::from_secs(5)),
-            ..Default::default()
-        })
-            .await;
-        Ok(().into())
+    // TODO: need to find worker with matching worker_heartbeat
+    let worker_info = workers_list.workers_info.iter().find(|worker_info| {
+        if let Some(hb) = worker_info.worker_heartbeat.as_ref() {
+            hb.worker_instance_key == worker_instance_key.to_string()
+        } else {
+            false
+        }
     });
-    worker.register_activity("pass_fail_act", |_ctx: ActContext, i: String| async move {
-        println!("STARTING ACTIVITY");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        return Ok(i);
-    });
-
-    println!("[run] 1st");
-    starter.start_with_worker(wf_name, &mut worker).await;
-
-    // for i in 0..5 {
-    //     worker.submit_wf(
-    //         format!("{wf_name}-{i}"),
-    //         wf_name,
-    //         vec![],
-    //         starter.workflow_options.clone(),
-    //     )
-    //         .await
-    //         .unwrap();
-    // }
-    worker.run_until_done().await.unwrap();
+    println!("worker_instance_key {worker_instance_key:?}");
+    println!("worker_info: {worker_info:#?}");
 
     // TODO: add some asserts to ensure data shows up
 }

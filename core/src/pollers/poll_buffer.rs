@@ -143,6 +143,7 @@ impl LongPollBuffer<PollWorkflowTaskQueueResponse, WorkflowSlotKind> {
 }
 
 impl LongPollBuffer<PollActivityTaskQueueResponse, ActivitySlotKind> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_activity_task(
         client: Arc<dyn WorkerClient>,
         task_queue: String,
@@ -209,6 +210,7 @@ impl LongPollBuffer<PollActivityTaskQueueResponse, ActivitySlotKind> {
 }
 
 impl LongPollBuffer<PollNexusTaskQueueResponse, NexusSlotKind> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_nexus_task(
         client: Arc<dyn WorkerClient>,
         task_queue: String,

@@ -264,17 +264,11 @@ impl WorkerTrait for Worker {
         self.shutdown_token.cancel();
         *self.status.lock() = WorkerStatus::ShuttingDown;
         // First, unregister worker from the client
-        if let Err(e) = self
-            .client
-            .workers()
-            .unregister_worker(self.worker_instance_key)
-        {
-            error!(
-                task_queue=%self.config.task_queue,
-                namespace=%self.config.namespace,
-                error=%e,
-                "Failed to unregister worker on shutdown",
-            );
+        if !self.client_worker_registrator.shared_namespace_worker {
+            let _res = self
+                .client
+                .workers()
+                .unregister_worker(self.worker_instance_key);
         }
 
         // Second, we want to stop polling of both activity and workflow tasks
@@ -301,6 +295,10 @@ impl WorkerTrait for Worker {
 
     async fn finalize_shutdown(self) {
         self.finalize_shutdown().await
+    }
+
+    fn worker_instance_key(&self) -> Uuid {
+        self.worker_instance_key
     }
 }
 
@@ -577,7 +575,7 @@ impl Worker {
             )
         });
         let poll_on_non_local_activities = at_task_mgr.is_some();
-        if !poll_on_non_local_activities {
+        if !poll_on_non_local_activities && !shared_namespace_worker {
             info!("Activity polling is disabled for this worker");
         };
         let la_sink = LAReqSink::new(local_act_mgr.clone());
@@ -622,6 +620,7 @@ impl Worker {
             slot_provider: provider,
             heartbeat_manager: worker_heartbeat,
             client: RwLock::new(client.clone()),
+            shared_namespace_worker,
         });
 
         if !shared_namespace_worker {
@@ -698,13 +697,11 @@ impl Worker {
     async fn shutdown(&self) {
         self.initiate_shutdown();
         if let Some(name) = self.workflows.get_sticky_queue_name() {
-            let heartbeat = if let Some(heartbeat_mgr) =
-                self.client_worker_registrator.heartbeat_manager.as_ref()
-            {
-                Some(heartbeat_mgr.heartbeat_callback.clone()())
-            } else {
-                None
-            };
+            let heartbeat = self
+                .client_worker_registrator
+                .heartbeat_manager
+                .as_ref()
+                .map(|hm| hm.heartbeat_callback.clone()());
 
             // This is a best effort call and we can still shutdown the worker if it fails
             match self.client.shutdown_worker(name, heartbeat).await {
@@ -1003,6 +1000,7 @@ struct ClientWorkerRegistrator {
     slot_provider: SlotProvider,
     heartbeat_manager: Option<WorkerHeartbeatManager>,
     client: RwLock<Arc<dyn WorkerClient>>,
+    shared_namespace_worker: bool,
 }
 
 impl ClientWorker for ClientWorkerRegistrator {
@@ -1032,6 +1030,7 @@ impl ClientWorker for ClientWorkerRegistrator {
             None
         }
     }
+
     fn new_shared_namespace_worker(
         &self,
     ) -> Result<Box<dyn SharedNamespaceWorkerTrait + Send + Sync>, anyhow::Error> {
@@ -1058,6 +1057,7 @@ struct WorkerHeartbeatManager {
 }
 
 impl WorkerHeartbeatManager {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: WorkerConfig,
         worker_instance_key: Uuid,
@@ -1108,7 +1108,7 @@ impl WorkerHeartbeatManager {
                 task_queue: task_queue.clone(),
                 deployment_version: deployment_version.clone(),
 
-                status: (*status.lock()).try_into().unwrap_or_default(),
+                status: (*status.lock()) as i32,
                 start_time: Some(SystemTime::now().into()),
                 plugins: config.plugins.clone(),
 

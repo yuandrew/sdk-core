@@ -15,6 +15,7 @@ use temporal_sdk_core_protos::temporal::api::workflowservice::v1::PollWorkflowTa
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn make_wft_poller(
     config: &WorkerConfig,
     sticky_queue_name: &Option<String>,

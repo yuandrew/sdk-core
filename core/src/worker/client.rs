@@ -679,7 +679,6 @@ impl WorkerClient for WorkerClientBag {
             identity: self.identity.clone(),
             worker_heartbeat,
         };
-        println!("record_worker_heartbeat {:#?}", request);
         Ok(self
             .cloned_client()
             .record_worker_heartbeat(request)

@@ -175,9 +175,7 @@ fn process_slot_info(
     heartbeat: &mut WorkerHeartbeat,
     slots_map: &mut HashMap<Uuid, HeartbeatSlotsInfo>,
 ) {
-    let slots_info = slots_map
-        .entry(worker_instance_key)
-        .or_insert_with(|| HeartbeatSlotsInfo::default());
+    let slots_info = slots_map.entry(worker_instance_key).or_default();
     if let Some(wft_slot_info) = heartbeat.workflow_task_slots_info.as_mut() {
         wft_slot_info.last_interval_processed_tasks = wft_slot_info.total_processed_tasks
             - slots_info
@@ -264,7 +262,6 @@ mod tests {
     };
     use temporal_sdk_core_api::worker::PollerBehavior;
     use temporal_sdk_core_protos::temporal::api::workflowservice::v1::RecordWorkerHeartbeatResponse;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn worker_heartbeat_basic() {
@@ -302,15 +299,13 @@ mod tests {
             .activity_task_poller_behavior(PollerBehavior::SimpleMaximum(1_usize))
             .max_outstanding_activities(1_usize)
             .build()
-            .unwrap()
-            .into();
+            .unwrap();
 
         let client = Arc::new(mock);
         let worker = worker::Worker::new(
             config,
             None,
             client.clone(),
-            None,
             None,
             Some(Duration::from_millis(100)),
             false,
