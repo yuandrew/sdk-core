@@ -457,10 +457,6 @@ impl Worker {
         let act_last_suc_poll_time = Arc::new(Mutex::new(None));
         let nexus_last_suc_poll_time = Arc::new(Mutex::new(None));
 
-        // let (wf_last_successful_poll_time_tx, wf_last_successful_poll_time_rx) = unbounded_channel();
-        // let (wf_sticky_last_successful_poll_time_tx, wf_sticky_last_successful_poll_time_rx) = unbounded_channel();
-        // let (act_last_successful_poll_time_tx, act_last_successful_poll_time_rx) = unbounded_channel();
-        // let (nexus_last_successful_poll_time_tx, nexus_last_successful_poll_time_rx) = unbounded_channel();
         let nexus_slots = MeteredPermitDealer::new(
             tuner.nexus_task_slot_supplier(),
             metrics.with_new_attrs([nexus_worker_type()]),
@@ -511,7 +507,7 @@ impl Worker {
                 };
 
                 let np_metrics = metrics.with_new_attrs([nexus_poller()]);
-                // nexus poller creation
+
                 let nexus_poll_buffer = Box::new(LongPollBuffer::new_nexus_task(
                     client.clone(),
                     config.task_queue.clone(),
@@ -1183,7 +1179,9 @@ impl WorkerHeartbeatManager {
                         .num_pollers
                         .nexus_current_pollers
                         .load(Ordering::Relaxed) as i32,
-                    last_successful_poll_time: nexus_last_suc_poll_time.lock().map(|time| time.into()),
+                    last_successful_poll_time: nexus_last_suc_poll_time
+                        .lock()
+                        .map(|time| time.into()),
                     is_autoscaling: config.nexus_task_poller_behavior.is_autoscaling(),
                 });
 

@@ -18,8 +18,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     use temporal_sdk_core::RuntimeOptionsBuilder;
-//! let server_options = sdk_client_options(Url::from_str("http://localhost:7233")?).build()?;
+//!     let server_options = sdk_client_options(Url::from_str("http://localhost:7233")?).build()?;
 //!
 //!     let telemetry_options = TelemetryOptionsBuilder::default().build()?;
 //!     let runtime_options = RuntimeOptionsBuilder::default().telemetry_options(telemetry_options).build().unwrap();

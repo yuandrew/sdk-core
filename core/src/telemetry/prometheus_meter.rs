@@ -12,12 +12,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use temporal_sdk_core_api::telemetry::metrics::{
-    CoreMeter, Counter, CounterBase, Gauge, GaugeBase, GaugeF64, GaugeF64Base, Histogram,
-    HistogramBase, HistogramDuration, HistogramDurationBase, HistogramF64, HistogramF64Base,
-    MetricAttributable, MetricAttributes, MetricParameters, NewAttributes, OrderedPromLabelSet,
-    WorkerHeartbeatMetrics,
-};
+use temporal_sdk_core_api::telemetry::metrics::{CoreMeter, Counter, CounterBase, Gauge, GaugeBase, GaugeF64, GaugeF64Base, HeartbeatMetricType, Histogram, HistogramBase, HistogramDuration, HistogramDurationBase, HistogramF64, HistogramF64Base, MetricAttributable, MetricAttributes, MetricParameters, NewAttributes, OrderedPromLabelSet, WorkerHeartbeatMetrics};
 
 #[derive(derive_more::From, derive_more::TryInto, Debug, Clone)]
 enum PromCollector {
@@ -543,6 +538,10 @@ impl CoreMeter for CorePrometheusMeter {
         )))
     }
 
+    fn counter_with_in_memory(&self, params: MetricParameters, in_memory_counter: HeartbeatMetricType) -> Counter {
+        todo!()
+    }
+
     fn histogram(&self, params: MetricParameters) -> Histogram {
         let hist = self.create_u64_hist(&params);
         Histogram::new(Arc::new(hist))
@@ -563,6 +562,10 @@ impl CoreMeter for CorePrometheusMeter {
         }))
     }
 
+    fn histogram_duration_with_in_memory(&self, params: MetricParameters, in_memory_hist: HeartbeatMetricType) -> HistogramDuration {
+        todo!()
+    }
+
     fn gauge(&self, params: MetricParameters) -> Gauge {
         let metric_name = params.name.to_string();
         Gauge::new(Arc::new(PromMetric::<IntGaugeVec>::new(
@@ -570,6 +573,10 @@ impl CoreMeter for CorePrometheusMeter {
             params.description.to_string(),
             self.registry.clone(),
         )))
+    }
+
+    fn gauge_with_in_memory(&self, params: MetricParameters, in_memory_metrics: HeartbeatMetricType) -> Gauge {
+        todo!()
     }
 
     fn gauge_f64(&self, params: MetricParameters) -> GaugeF64 {

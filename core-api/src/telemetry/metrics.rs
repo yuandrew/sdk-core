@@ -135,12 +135,7 @@ impl WorkerHeartbeatMetrics {
             "sticky_cache_miss" => Some(HeartbeatMetricType::Regular(
                 self.total_sticky_cache_miss.clone(),
             )),
-            // TODO: need to look up "num_pollers" metric with poller_type==workflow_task
             "num_pollers" => Some(HeartbeatMetricType::WithLabel(self.num_pollers.as_map())),
-            // "wft_current_pollers" => Some(HeartbeatMetricType::Regular(self.wft_current_pollers.clone())),
-            // "sticky_wft_current_pollers" => Some(HeartbeatMetricType::Regular(self.sticky_wft_current_pollers.clone())),
-            // "activity_current_pollers" => Some(HeartbeatMetricType::Regular(self.activity_current_pollers.clone())),
-            // "nexus_current_pollers" => Some(HeartbeatMetricType::Regular(self.nexus_current_pollers.clone())),
             "workflow_task_execution_failed" => Some(HeartbeatMetricType::Regular(
                 self.workflow_task_execution_failed.clone(),
             )),
@@ -365,12 +360,14 @@ pub trait CounterBase: Send + Sync {
     fn adds(&self, value: u64);
 }
 
+pub type CounterType = LazyBoundMetric<
+    Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
+    Arc<dyn CounterBase>,
+>;
+
 #[derive(Clone)]
 pub struct Counter {
-    primary: LazyBoundMetric<
-        Arc<dyn MetricAttributable<Box<dyn CounterBase>> + Send + Sync>,
-        Arc<dyn CounterBase>,
-    >,
+    primary: CounterType,
     in_memory: Option<HeartbeatMetricType>,
 }
 impl Counter {
@@ -440,6 +437,7 @@ impl CounterBase for Counter {
         bound.adds(value);
 
         if let Some(ref in_mem) = self.in_memory {
+            println!("self.primary.attributes {:?}", self.primary.attributes);
             match in_mem {
                 HeartbeatMetricType::Regular(metric) => {
                     metric.fetch_add(value, Ordering::Relaxed);
@@ -581,12 +579,14 @@ pub trait HistogramDurationBase: Send + Sync {
     fn records(&self, value: Duration);
 }
 
+pub type HistogramDurationType = LazyBoundMetric<
+    Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
+    Arc<dyn HistogramDurationBase>,
+>;
+
 #[derive(Clone)]
 pub struct HistogramDuration {
-    primary: LazyBoundMetric<
-        Arc<dyn MetricAttributable<Box<dyn HistogramDurationBase>> + Send + Sync>,
-        Arc<dyn HistogramDurationBase>,
-    >,
+    primary: HistogramDurationType,
     in_memory: Option<HeartbeatMetricType>,
 }
 impl HistogramDuration {
@@ -689,12 +689,14 @@ pub trait GaugeBase: Send + Sync {
     fn records(&self, value: u64);
 }
 
+pub type GaugeType = LazyBoundMetric<
+    Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
+    Arc<dyn GaugeBase>,
+>;
+
 #[derive(Clone)]
 pub struct Gauge {
-    primary: LazyBoundMetric<
-        Arc<dyn MetricAttributable<Box<dyn GaugeBase>> + Send + Sync>,
-        Arc<dyn GaugeBase>,
-    >,
+    primary: GaugeType,
     in_memory: Option<HeartbeatMetricType>,
 }
 impl Gauge {
@@ -771,10 +773,8 @@ impl GaugeBase for Gauge {
                     MetricAttributes::OTel { kvs } => {
                         for val in kvs.iter() {
                             if val.key.as_str() == "poller_type" {
-                                println!("FOUND POLLER_TYPE {:?}", val.value);
                                 let _ = metrics.get(&val.value.to_string()).map(|metric| {
                                     metric.fetch_add(value, Ordering::Relaxed);
-                                    println!("\tAdded {value}");
                                 });
                             }
                         }

@@ -73,6 +73,7 @@ use temporal_sdk_core_protos::{
 };
 use tokio::{join, sync::Barrier};
 use url::Url;
+use temporal_sdk_core::telemetry::start_prometheus_metric_exporter;
 
 pub(crate) async fn get_text(endpoint: String) -> String {
     reqwest::get(endpoint).await.unwrap().text().await.unwrap()
@@ -523,33 +524,33 @@ async fn query_of_closed_workflow_doesnt_tick_terminal_metric(
     assert!(matching_line.ends_with('1'));
 }
 
-// #[test]
-// fn runtime_new() {
-//     let mut rt = CoreRuntime::new(
-//         get_integ_runtime_options(get_integ_telem_options()),
-//         TokioRuntimeBuilder::default(),
-//     )
-//     .unwrap();
-//     let handle = rt.tokio_handle();
-//     let _rt = handle.enter();
-//     let (telemopts, addr, _aborter) = prom_metrics(None);
-//     rt.telemetry_mut()
-//         .attach_late_init_metrics(telemopts.metrics.unwrap());
-//     let opts = get_integ_server_options();
-//     handle.block_on(async {
-//         let mut raw_client = opts
-//             .connect_no_namespace(rt.telemetry().get_temporal_metric_meter())
-//             .await
-//             .unwrap();
-//         assert!(raw_client.get_client().capabilities().is_some());
-//         let _ = raw_client
-//             .list_namespaces(ListNamespacesRequest::default())
-//             .await
-//             .unwrap();
-//         let body = get_text(format!("http://{addr}/metrics")).await;
-//         assert!(body.contains("temporal_request"));
-//     });
-// }
+#[test]
+fn runtime_new() {
+    let mut rt = CoreRuntime::new(
+        get_integ_runtime_options(get_integ_telem_options()),
+        TokioRuntimeBuilder::default(),
+    )
+    .unwrap();
+    let handle = rt.tokio_handle();
+    let _rt = handle.enter();
+    let (telemopts, addr, _aborter) = prom_metrics(None);
+    rt.telemetry_mut()
+        .attach_late_init_metrics(telemopts.metrics.unwrap());
+    let opts = get_integ_server_options();
+    handle.block_on(async {
+        let mut raw_client = opts
+            .connect_no_namespace(rt.telemetry().get_temporal_metric_meter())
+            .await
+            .unwrap();
+        assert!(raw_client.get_client().capabilities().is_some());
+        let _ = raw_client
+            .list_namespaces(ListNamespacesRequest::default())
+            .await
+            .unwrap();
+        let body = get_text(format!("http://{addr}/metrics")).await;
+        assert!(body.contains("temporal_request"));
+    });
+}
 
 #[rstest::rstest]
 #[tokio::test]
@@ -1388,5 +1389,64 @@ async fn runtime_new_otel() {
     worker.run_until_done().await.unwrap();
 
     // TODO: add some asserts to ensure data shows up
-    panic!("need prints to show");
+}
+
+#[tokio::test]
+async fn runtime_new_prom() {
+    let runtimeopts = RuntimeOptionsBuilder::default()
+        .telemetry_options(get_integ_telem_options())
+        .heartbeat_interval(Some(Duration::from_millis(100)))
+        .build()
+        .unwrap();
+    let mut rt = CoreRuntime::new(runtimeopts, TokioRuntimeBuilder::default()).unwrap();
+    let handle = rt.tokio_handle();
+    let _rt = handle.enter();
+    // Prom exporter
+    let url = Some("grpc://localhost:4317")
+        .map(|x| x.parse::<Url>().unwrap())
+        .unwrap();
+    let mut opts_build = PrometheusExporterOptionsBuilder::default();
+    // opts_build.socket_addr(ANY_PORT.parse().unwrap());
+    let opts = opts_build.url(url).build().unwrap();
+    // If wanna add more options: https://github.com/temporalio/sdk-ruby/blob/143e421d82d16e58bd45226998363d55e4bc3bbb/temporalio/ext/src/runtime.rs#L113C21-L135C22
+    rt.telemetry_mut().attach_late_init_metrics(start_prometheus_metric_exporter(opts).unwrap().meter);
+
+    let wf_name = "runtime_new_otel";
+    let mut starter = CoreWfStarter::new_with_runtime(wf_name, rt);
+    starter.worker_config.max_cached_workflows(5_usize);
+    let mut worker = starter.worker().await;
+
+    // Run a workflow
+    worker.register_wf(wf_name.to_string(), |ctx: WfContext| async move {
+        ctx.activity(ActivityOptions {
+            activity_type: "pass_fail_act".to_string(),
+            input: "pass".as_json_payload().expect("serializes fine"),
+            start_to_close_timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        })
+            .await;
+        Ok(().into())
+    });
+    worker.register_activity("pass_fail_act", |_ctx: ActContext, i: String| async move {
+        println!("STARTING ACTIVITY");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Ok(i);
+    });
+
+    println!("[run] 1st");
+    starter.start_with_worker(wf_name, &mut worker).await;
+
+    // for i in 0..5 {
+    //     worker.submit_wf(
+    //         format!("{wf_name}-{i}"),
+    //         wf_name,
+    //         vec![],
+    //         starter.workflow_options.clone(),
+    //     )
+    //         .await
+    //         .unwrap();
+    // }
+    worker.run_until_done().await.unwrap();
+
+    // TODO: add some asserts to ensure data shows up
 }

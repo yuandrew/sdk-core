@@ -15,7 +15,6 @@ use std::{
     },
     time::{Duration, UNIX_EPOCH},
 };
-use temporal_sdk_core::telemetry::CoreMeterWithMem;
 use temporal_sdk_core::{
     CoreRuntime, RuntimeOptions as CoreRuntimeOptions,
     RuntimeOptionsBuilder as CoreRuntimeOptionsBuilder, TokioRuntimeBuilder,

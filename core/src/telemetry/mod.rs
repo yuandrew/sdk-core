@@ -1,8 +1,6 @@
 //! This module helps with the initialization and management of telemetry. IE: Metrics and tracing.
 //! Logs from core are all traces, which may be exported to the console, in memory, or externally.
 
-#[cfg(feature = "otel")]
-mod in_memory;
 mod log_export;
 pub(crate) mod metrics;
 #[cfg(feature = "otel")]

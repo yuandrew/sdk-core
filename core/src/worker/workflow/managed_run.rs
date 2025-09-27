@@ -233,9 +233,7 @@ impl ManagedRun {
         }
 
         // The update field is only populated in the event we hit the cache
-        println!("// The update field is only populated in the event we hit the cache");
         let activation = if work.update.is_real() {
-            println!("self.metrics.sticky_cache_hit();");
             self.metrics.sticky_cache_hit();
             self.wfm.new_work_from_server(work.update, work.messages)?
         } else {

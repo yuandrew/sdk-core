@@ -70,7 +70,6 @@ impl SharedNamespaceWorker {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(heartbeat_interval);
             let mut last_heartbeat_time = HashMap::new();
-            // TODO: maybe combine these 2, fix name
             let mut last_processed_tasks = HashMap::new();
             loop {
                 tokio::select! {

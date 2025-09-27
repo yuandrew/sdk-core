@@ -133,9 +133,6 @@ impl MetricsContext {
 
     /// A workflow task queue poll succeeded
     pub(crate) fn wf_tq_poll_ok(&self) {
-        // TODO: add mechanism for taking timestamp
-        println!("wf_tq_poll_ok");
-        // TODO: increment the WorkerHeartbeatMetrics metric too
         self.instruments.wf_task_queue_poll_succeed_counter.adds(1);
     }
 
@@ -289,13 +286,11 @@ impl MetricsContext {
 
     /// A workflow task found a cached workflow to run against
     pub(crate) fn sticky_cache_hit(&self) {
-        println!("self.instruments.sticky_cache_hit.adds(1);");
         self.instruments.sticky_cache_hit.adds(1);
     }
 
     /// A workflow task did not find a cached workflow
     pub(crate) fn sticky_cache_miss(&self) {
-        println!("self.instruments.sticky_cache_miss.adds(1);");
         self.instruments.sticky_cache_miss.adds(1);
     }
 
@@ -323,14 +318,11 @@ impl Instruments {
         };
 
         let create_gauge = |params: MetricParameters| -> Gauge {
-            println!("params.name {:?}", params.name);
             if let Some(in_mem) = in_memory.clone()
                 && let Some(metric) = in_mem.get_metric(&params.name)
             {
-                println!("a");
                 meter.gauge_with_in_memory(params, metric)
             } else {
-                println!("b");
                 meter.gauge(params)
             }
         };
