@@ -68,7 +68,6 @@ opentelemetry_sdk = { version = "0.30", features = [
     "rt-tokio",
     "metrics",
     "spec_unstable_metrics_views",
-#    "testing",
 ], optional = true }
 opentelemetry-otlp = { version = "0.30", features = [
     "tokio",

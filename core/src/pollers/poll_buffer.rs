@@ -326,7 +326,7 @@ where
                     let pf = pf.clone();
                     let post_pf = post_pf.clone();
                     let tx = tx.clone();
-                    let report_handle = poll_scaler.get_report_handle(); // here, last successful time
+                    let report_handle = poll_scaler.get_report_handle();
                     // Reduce poll timeout if we're frequently getting tasks, to avoid having many
                     // outstanding long polls for a full minute after a burst subsides.
                     let timeout_override =

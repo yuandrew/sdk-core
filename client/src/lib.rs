@@ -1808,12 +1808,12 @@ where
         query: String,
     ) -> Result<ListWorkersResponse> {
         Ok(WorkflowService::list_workers(&mut self.clone(),
-                                         ListWorkersRequest {
-                                             namespace: self.namespace().to_owned(),
-                                             page_size,
-                                             next_page_token,
-                                             query,
-                                         }).await?.into_inner())
+         ListWorkersRequest {
+             namespace: self.namespace().to_owned(),
+             page_size,
+             next_page_token,
+             query,
+         }).await?.into_inner())
     }
 
     async fn get_search_attributes(&self) -> Result<GetSearchAttributesResponse> {

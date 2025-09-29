@@ -211,7 +211,6 @@ impl ClientWorkerSet {
         &self,
         worker: Arc<dyn ClientWorker + Send + Sync>,
     ) -> Result<(), anyhow::Error> {
-        println!("register_worker");
         self.worker_manager.write().register(worker)
     }
 
