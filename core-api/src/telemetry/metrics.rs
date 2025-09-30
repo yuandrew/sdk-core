@@ -79,6 +79,38 @@ pub enum HeartbeatMetricType {
     WithLabel(HashMap<String, Arc<AtomicU64>>),
 }
 
+impl HeartbeatMetricType {
+    fn record_counter(&self, delta: u64) {
+        match self {
+            HeartbeatMetricType::Regular(metric) => {
+                metric.fetch_add(delta, Ordering::Relaxed);
+            }
+            HeartbeatMetricType::WithLabel(_) => {
+                dbg_panic!("No in memory metric should use labels today");
+            }
+        }
+    }
+
+    fn record_histogram_observation(&self) {
+        self.record_counter(1);
+    }
+
+    fn record_gauge(&self, value: u64, attributes: &MetricAttributes) {
+        match self {
+            HeartbeatMetricType::Regular(metric) => {
+                metric.store(value, Ordering::Relaxed);
+            }
+            HeartbeatMetricType::WithLabel(metrics) => {
+                if let Some(label_value) = label_value_from_attributes(attributes, "poller_type") {
+                    if let Some(metric) = metrics.get(label_value.as_str()) {
+                        metric.store(value, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn label_value_from_attributes(attributes: &MetricAttributes, key: &str) -> Option<String> {
     match attributes {
         MetricAttributes::Prometheus { labels } => labels.as_prom_labels().get(key).cloned(),
@@ -101,21 +133,21 @@ pub struct NumPollersMetric {
 
 impl NumPollersMetric {
     pub fn as_map(&self) -> HashMap<String, Arc<AtomicU64>> {
-        let mut map = HashMap::new();
-        map.insert(
-            "workflow_task".to_string(),
-            self.wft_current_pollers.clone(),
-        );
-        map.insert(
-            "sticky_workflow_task".to_string(),
-            self.sticky_wft_current_pollers.clone(),
-        );
-        map.insert(
-            "activity_task".to_string(),
-            self.activity_current_pollers.clone(),
-        );
-        map.insert("nexus_task".to_string(), self.nexus_current_pollers.clone());
-        map
+        HashMap::from([
+            (
+                "workflow_task".to_string(),
+                self.wft_current_pollers.clone(),
+            ),
+            (
+                "sticky_workflow_task".to_string(),
+                self.sticky_wft_current_pollers.clone(),
+            ),
+            (
+                "activity_task".to_string(),
+                self.activity_current_pollers.clone(),
+            ),
+            ("nexus_task".to_string(), self.nexus_current_pollers.clone()),
+        ])
     }
 }
 
@@ -417,14 +449,7 @@ impl Counter {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(value, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(_) => {
-                    dbg_panic!("No in memory metric should use labels today");
-                }
-            }
+            in_mem.record_counter(value);
         }
     }
 
@@ -449,14 +474,7 @@ impl CounterBase for Counter {
         bound.adds(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(value, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(_) => {
-                    dbg_panic!("No in memory metric should use labels today");
-                }
-            }
+            in_mem.record_counter(value);
         }
     }
 }
@@ -637,14 +655,7 @@ impl HistogramDuration {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(1, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(_) => {
-                    dbg_panic!("No in memory HistogramDuration should use labels today");
-                }
-            }
+            in_mem.record_histogram_observation();
         }
     }
 
@@ -667,14 +678,7 @@ impl HistogramDurationBase for HistogramDuration {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.fetch_add(1, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(_) => {
-                    dbg_panic!("No in memory HistogramDuration should use labels today");
-                }
-            }
+            in_mem.record_histogram_observation();
         }
     }
 }
@@ -745,20 +749,7 @@ impl Gauge {
         }
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.store(value, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(metrics) => {
-                    if let Some(label_value) =
-                        label_value_from_attributes(attributes, "poller_type")
-                    {
-                        if let Some(metric) = metrics.get(&label_value) {
-                            metric.store(value, Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
+            in_mem.record_gauge(value, attributes);
         }
     }
 
@@ -781,20 +772,7 @@ impl GaugeBase for Gauge {
         bound.records(value);
 
         if let Some(ref in_mem) = self.in_memory {
-            match in_mem {
-                HeartbeatMetricType::Regular(metric) => {
-                    metric.store(value, Ordering::Relaxed);
-                }
-                HeartbeatMetricType::WithLabel(metrics) => {
-                    if let Some(label_value) =
-                        label_value_from_attributes(&self.primary.attributes, "poller_type")
-                    {
-                        if let Some(metric) = metrics.get(&label_value) {
-                            metric.store(value, Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
+            in_mem.record_gauge(value, &self.primary.attributes);
         }
     }
 }

@@ -47,7 +47,7 @@ impl SharedNamespaceWorker {
             .nexus_task_poller_behavior(PollerBehavior::SimpleMaximum(1_usize))
             .build()
             .expect("all required fields should be implemented");
-        let worker = crate::worker::Worker::new_with_pollers_inner(
+        let worker = crate::worker::Worker::new_with_pollers(
             config,
             None,
             client.clone(),
@@ -308,7 +308,6 @@ mod tests {
             client.clone(),
             None,
             Some(Duration::from_millis(100)),
-            false,
         )
         .unwrap();
 
