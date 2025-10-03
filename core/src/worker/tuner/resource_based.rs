@@ -4,8 +4,9 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
+    thread,
     time::{Duration, Instant},
 };
 use temporal_sdk_core_api::{
@@ -472,39 +473,15 @@ impl<MI: SystemResourceInfo + Sync + Send> ResourceController<MI> {
     }
 }
 
-/// Implements [SystemResourceInfo] using the [sysinfo] crate
 #[derive(Debug)]
-pub struct RealSysInfo {
+struct RealSysInfoInner {
     sys: Mutex<sysinfo::System>,
     total_mem: AtomicU64,
     cur_mem_usage: AtomicU64,
     cur_cpu_usage: AtomicU64,
-    last_refresh: AtomicCell<Instant>,
 }
-impl RealSysInfo {
-    fn new() -> Self {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_memory();
-        let total_mem = sys.total_memory();
-        let s = Self {
-            sys: Mutex::new(sys),
-            last_refresh: AtomicCell::new(Instant::now()),
-            cur_mem_usage: AtomicU64::new(0),
-            cur_cpu_usage: AtomicU64::new(0),
-            total_mem: AtomicU64::new(total_mem),
-        };
-        s.refresh();
-        s
-    }
 
-    fn refresh_if_needed(&self) {
-        // This is all quite expensive and meaningfully slows everything down if it's allowed to
-        // happen more often. A better approach than a lock would be needed to go faster.
-        if (Instant::now() - self.last_refresh.load()) > Duration::from_millis(100) {
-            self.refresh();
-        }
-    }
-
+impl RealSysInfoInner {
     fn refresh(&self) {
         let mut lock = self.sys.lock();
         lock.refresh_memory();
@@ -522,25 +499,75 @@ impl RealSysInfo {
             self.cur_mem_usage.store(mem, Ordering::Release);
         }
         self.cur_cpu_usage.store(cpu.to_bits(), Ordering::Release);
-        self.last_refresh.store(Instant::now());
+    }
+}
+
+/// Implements [SystemResourceInfo] using the [sysinfo] crate
+#[derive(Debug)]
+pub struct RealSysInfo {
+    inner: Arc<RealSysInfoInner>,
+    shutdown: Arc<AtomicBool>,
+    refresh_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl RealSysInfo {
+    pub(crate) fn new() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let total_mem = sys.total_memory();
+        let inner = Arc::new(RealSysInfoInner {
+            sys: Mutex::new(sys),
+            cur_mem_usage: AtomicU64::new(0),
+            cur_cpu_usage: AtomicU64::new(0),
+            total_mem: AtomicU64::new(total_mem),
+        });
+        inner.refresh();
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_inner = inner.clone();
+        let thread_shutdown = shutdown.clone();
+        let handle = thread::Builder::new()
+            .name("temporal-real-sysinfo".to_string())
+            .spawn(move || {
+                const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+                loop {
+                    if thread_shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    thread_inner.refresh();
+                    thread::sleep(REFRESH_INTERVAL);
+                }
+            })
+            .expect("failed to spawn RealSysInfo refresh thread");
+
+        Self {
+            inner,
+            shutdown,
+            refresh_thread: Mutex::new(Some(handle)),
+        }
     }
 }
 
 impl SystemResourceInfo for RealSysInfo {
     fn total_mem(&self) -> u64 {
-        self.total_mem.load(Ordering::Acquire)
+        self.inner.total_mem.load(Ordering::Acquire)
     }
 
     fn used_mem(&self) -> u64 {
-        // TODO: This should really happen on a background thread since it's getting called from
-        //   the async reserve
-        self.refresh_if_needed();
-        self.cur_mem_usage.load(Ordering::Acquire)
+        self.inner.cur_mem_usage.load(Ordering::Acquire)
     }
 
     fn used_cpu_percent(&self) -> f64 {
-        self.refresh_if_needed();
-        f64::from_bits(self.cur_cpu_usage.load(Ordering::Acquire))
+        f64::from_bits(self.inner.cur_cpu_usage.load(Ordering::Acquire))
+    }
+}
+
+impl Drop for RealSysInfo {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        if let Some(handle) = self.refresh_thread.lock().take() {
+            let _ = handle.join();
+        }
     }
 }
 
