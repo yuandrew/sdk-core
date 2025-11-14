@@ -1,3 +1,5 @@
+use crate::telemetry::telemetry_init_fallback;
+use temporalio_common::protos::temporal::api::workflowservice::v1::RespondNexusTaskCompletedResponse;
 use crate::{
     PollError, prost_dur,
     test_help::{
@@ -33,6 +35,12 @@ use temporalio_common::{
 };
 use tokio::sync::{Barrier, watch};
 use tokio::time::timeout;
+use temporalio_common::protos::coresdk::activity_result::ActivityExecutionResult;
+use temporalio_common::protos::coresdk::ActivityTaskCompletion;
+use temporalio_common::protos::coresdk::nexus::{nexus_task_completion, NexusTaskCompletion};
+use temporalio_common::protos::temporal::api::nexus::v1::{response, start_operation_response, StartOperationResponse};
+use temporalio_common::protos::temporal::api::workflowservice::v1::{PollActivityTaskQueueResponse, RespondActivityTaskCompletedResponse};
+use crate::test_help::{drain_pollers_and_shutdown, QueueResponse};
 
 #[tokio::test]
 async fn after_shutdown_of_worker_get_shutdown_err() {
@@ -421,5 +429,115 @@ async fn test_worker_type_shutdown_all_combinations() {
             shutdown_result.is_ok(),
             "worker shutdown should not hang for {description}"
         );
+    }
+}
+
+#[tokio::test]
+async fn test_type_shutdown_with_tasks() {
+    telemetry_init_fallback();
+    let combinations = [
+        // (WorkerTaskTypes::workflow_only(), "workflows only"),
+        (WorkerTaskTypes::activity_only(), "activities only"),
+        // (WorkerTaskTypes::nexus_only(), "nexus only"),
+        // (
+        //     WorkerTaskTypes {
+        //         enable_workflows: true,
+        //         enable_activities: true,
+        //         enable_nexus: false,
+        //     },
+        //     "workflows + activities",
+        // ),
+        // (
+        //     WorkerTaskTypes {
+        //         enable_workflows: true,
+        //         enable_activities: false,
+        //         enable_nexus: true,
+        //     },
+        //     "workflows + nexus",
+        // ),
+        // (
+        //     WorkerTaskTypes {
+        //         enable_workflows: false,
+        //         enable_activities: true,
+        //         enable_nexus: true,
+        //     },
+        //     "activities + nexus",
+        // ),
+        // (WorkerTaskTypes::all(), "all types"),
+    ];
+
+    for (task_types, description) in combinations {
+        eprintln!("\nTesting: {description}");
+
+        let mut mock_client = mock_worker_client();
+        if task_types.enable_workflows {
+            mock_client
+                .expect_complete_workflow_task()
+                .times(1)
+                .returning(|_| Ok(RespondWorkflowTaskCompletedResponse::default()));
+            // mock_client.expect_poll_workflow_task().times(1).returning(|_, _| Ok(PollWorkflowTaskQueueResponse::default()));
+        }
+        if task_types.enable_activities {
+            mock_client.expect_poll_activity_task().times(1).returning(|_, _| Ok(PollActivityTaskQueueResponse {
+                task_token: vec![1],
+                ..Default::default()
+            }));
+            mock_client.expect_complete_activity_task().times(1).returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
+        }
+        if task_types.enable_nexus {
+            mock_client.expect_poll_nexus_task().times(1).returning(|_, _| Ok(Default::default()));
+            mock_client.expect_complete_nexus_task().times(1).returning(|_, _| Ok(RespondNexusTaskCompletedResponse::default()));
+        }
+
+        let t = canned_histories::single_timer("1");
+        let mut mh = MockPollCfg::from_resp_batches("fakeid", t, [1], mock_client);
+        mh.enforce_correct_number_of_polls = false;
+        let act_tasks: Vec<QueueResponse<PollActivityTaskQueueResponse>> = vec![QueueResponse::from(PollActivityTaskQueueResponse::default())];
+        mh.activity_responses = Some(act_tasks);
+        let mut mock = build_mock_pollers(mh);
+        mock.worker_cfg(|w| {
+            w.task_types = task_types;
+            w.max_cached_workflows = 1;
+        });
+        let worker = mock_worker(mock);
+
+        println!("a");
+        if task_types.enable_workflows {
+            let activation = worker.poll_workflow_activation().await.unwrap();
+            let _ = worker
+                .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
+                    activation.run_id,
+                    vec![],
+                ))
+                .await;
+        }
+
+        println!("a");
+        if task_types.enable_activities {
+            let task = worker.poll_activity_task().await.unwrap();
+            worker.complete_activity_task(ActivityTaskCompletion {
+                task_token: task.task_token,
+                result: Some(ActivityExecutionResult::ok(Default::default())),
+            })
+                .await.unwrap();
+        }
+
+        println!("a");
+        if task_types.enable_nexus {
+            let task = worker.poll_nexus_task().await.unwrap();
+            worker
+                .complete_nexus_task(NexusTaskCompletion {
+                    task_token: task.task_token().to_vec(),
+                    status: None,
+                })
+                .await.unwrap();
+
+        }
+
+        timeout(Duration::from_secs(10), async {
+            worker.shutdown().await;
+        })
+            .await
+            .unwrap_or_else(|_| panic!("Worker shutdown should not hang after processing tasks for {description}"));
     }
 }

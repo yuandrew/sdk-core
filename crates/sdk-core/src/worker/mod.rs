@@ -524,21 +524,27 @@ impl Worker {
                 act_poller,
                 nexus_poller,
             } => {
+                println!("wft_stream {:?}", wft_stream.is_some());
                 let wft_stream = config
                     .task_types
                     .enable_workflows
                     .then_some(wft_stream)
                     .flatten();
+                println!("wft_stream after {:?}", wft_stream.is_some());
+                println!("act_poller {:?}", act_poller.is_some());
                 let act_poller = config
                     .task_types
                     .enable_activities
                     .then_some(act_poller)
                     .flatten();
+                println!("act_poller after {:?}", act_poller.is_some());
+                println!("nexus_poller {:?}", nexus_poller.is_some());
                 let nexus_poller = config
                     .task_types
                     .enable_nexus
                     .then_some(nexus_poller)
                     .flatten();
+                println!("nexus_poller after {:?}", nexus_poller.is_some());
 
                 let ap = act_poller
                     .map(|ap| MockPermittedPollBuffer::new(Arc::new(act_slots.clone()), ap));
