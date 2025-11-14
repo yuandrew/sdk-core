@@ -3,6 +3,7 @@ use crate::{
         CoreWfStarter, fake_grpc_server::fake_server, get_integ_runtime_options,
         get_integ_server_options, get_integ_telem_options, mock_sdk_cfg,
     },
+    integ_tests::mk_nexus_endpoint,
     shared_tests,
 };
 use assert_matches::assert_matches;
@@ -18,8 +19,9 @@ use std::{
     },
     time::Duration,
 };
+use tokio::join;
 use temporalio_client::WorkflowOptions;
-use temporalio_common::worker::WorkerTaskTypes;
+use temporalio_common::worker::{WorkerTaskTypes};
 use temporalio_common::{
     Worker,
     errors::WorkerValidationError,
@@ -28,6 +30,7 @@ use temporalio_common::{
         coresdk::{
             ActivityTaskCompletion,
             activity_result::ActivityExecutionResult,
+            nexus::{NexusTaskCompletion, nexus_task_completion},
             workflow_completion::{
                 Failure, WorkflowActivationCompletion, workflow_activation_completion::Status,
             },
@@ -45,6 +48,7 @@ use temporalio_common::{
                     self as EventAttributes, WorkflowTaskFailedEventAttributes,
                 },
             },
+            nexus::v1::{Response as NexusResponse, StartOperationResponse, response, start_operation_response},
             workflowservice::v1::{
                 GetWorkflowExecutionHistoryResponse, PollActivityTaskQueueResponse,
                 RespondActivityTaskCompletedResponse,
@@ -58,7 +62,7 @@ use temporalio_common::{
     },
 };
 use temporalio_sdk::{
-    ActivityOptions, LocalActivityOptions, WfContext, interceptors::WorkerInterceptor,
+    ActivityOptions, LocalActivityOptions, NexusOperationOptions, WfContext, interceptors::WorkerInterceptor,
 };
 use temporalio_sdk_core::{
     CoreRuntime, ResourceBasedTuner, ResourceSlotOptions, TunerBuilder, init_worker,
@@ -71,6 +75,7 @@ use tokio::sync::{Barrier, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use temporalio_common::protos::coresdk::nexus::NexusOperationCancellationType;
 
 #[tokio::test]
 async fn worker_validation_fails_on_nonexistent_namespace() {
@@ -949,5 +954,177 @@ async fn worker_type_shutdown_all_combinations() {
             shutdown_result.is_ok(),
             "Worker shutdown should not hang for {description}"
         );
+    }
+}
+
+#[tokio::test]
+async fn test_type_shutdown_with_tasks() {
+    let combinations = [
+        (WorkerTaskTypes::workflow_only(), "workflows only"),
+        (WorkerTaskTypes::activity_only(), "activities only"),
+        (WorkerTaskTypes::nexus_only(), "nexus only"),
+        (
+            WorkerTaskTypes {
+                enable_workflows: true,
+                enable_activities: true,
+                enable_nexus: false,
+            },
+            "workflows + activities",
+        ),
+        (
+            WorkerTaskTypes {
+                enable_workflows: true,
+                enable_activities: false,
+                enable_nexus: true,
+            },
+            "workflows + nexus",
+        ),
+        (
+            WorkerTaskTypes {
+                enable_workflows: false,
+                enable_activities: true,
+                enable_nexus: true,
+            },
+            "activities + nexus",
+        ),
+        (WorkerTaskTypes::all(), "all types"),
+    ];
+
+    for (task_types, description) in combinations {
+        eprintln!("\nTesting: {description}");
+        let wf_type = format!("test_type_shutdown_with_tasks_{}", description.replace(" ", "_"));
+        let mut starter = CoreWfStarter::new(&wf_type);
+        if !task_types.enable_workflows {
+            starter.worker_config.max_cached_workflows(0usize);
+        }
+        starter.worker_config.task_types(task_types);
+
+        let mut worker = starter.worker().await;
+        let core_worker = starter.get_worker().await.clone();
+
+        let nexus_endpoint = if task_types.enable_nexus {
+            Some(mk_nexus_endpoint(&mut starter).await)
+        } else {
+            None
+        };
+
+        if task_types.enable_activities {
+            worker.register_activity(
+                "test_activity",
+                |_: temporalio_sdk::ActContext, _: ()| async move {
+                    println!("HIHIHIHIHIH");
+                    Ok(()) },
+            );
+        }
+
+        let has_activities = task_types.enable_activities;
+        let has_nexus = task_types.enable_nexus;
+        println!("has_nexus: {has_nexus}, has_activities: {has_activities}");
+        let endpoint_for_wf = nexus_endpoint.clone();
+        let wf_fn = move |ctx: WfContext| {
+            let endpoint = endpoint_for_wf.clone();
+            async move {
+                println!("WF started");
+                if has_activities {
+                    println!("activity");
+                    ctx.activity(ActivityOptions {
+                        activity_type: "test_activity".to_string(),
+                        start_to_close_timeout: Some(Duration::from_secs(5)),
+                        ..Default::default()
+                    })
+                        .await;
+                    println!("activity done");
+                }
+
+                if has_nexus {
+                    let _ = ctx
+                        .start_nexus_operation(NexusOperationOptions {
+                            endpoint: endpoint.unwrap(),
+                            service: "test-service".to_string(),
+                            operation: "test-op".to_string(),
+                            input: None,
+                            schedule_to_close_timeout: Some(Duration::from_secs(5)),
+                            cancellation_type: Some(NexusOperationCancellationType::TryCancel),
+                            nexus_header: Default::default(),
+                        })
+                        .await;
+                    println!("start_nexus_operation completed");
+                }
+
+                Ok(().into())
+            }
+        };
+
+        // We need a separate worker to start the workflow if the main worker does not
+        // have workflows enabled
+        let worker2 = if !task_types.enable_workflows {
+            let mut starter2 = starter.clone_no_worker();
+            starter2.worker_config.max_cached_workflows(1000usize);
+            starter2.worker_config.task_types(WorkerTaskTypes::workflow_only());
+            let mut worker2 = starter2.worker().await;
+            worker2.register_wf(wf_type.clone(), wf_fn.clone());
+            starter2.start_with_worker(wf_type.clone(), &mut worker2).await;
+            Some(worker2)
+        } else {
+            None
+        };
+
+        worker.register_wf(wf_type.clone(), wf_fn);
+
+        // Submit and run workflow
+        if task_types.enable_workflows {
+            starter.start_with_worker(wf_type.clone(), &mut worker).await;
+        }
+
+        if task_types.enable_nexus {
+            let core_worker_clone = core_worker.clone();
+                if let Ok(task) = timeout(Duration::from_secs(2), core_worker_clone.poll_nexus_task()).await {
+                    println!("task_polled");
+                    let _ = core_worker_clone
+                        .complete_nexus_task(NexusTaskCompletion {
+                            task_token: task.unwrap().task_token().to_vec(),
+                            status: Some(nexus_task_completion::Status::Completed(
+                                NexusResponse {
+                                    variant: Some(response::Variant::StartOperation(
+                                        StartOperationResponse {
+                                            variant: Some(start_operation_response::Variant::SyncSuccess(
+                                                start_operation_response::Sync {
+                                                    payload: None,
+                                                    links: vec![],
+                                                },
+                                            )),
+                                        },
+                                    )),
+                                },
+                            )),
+                        })
+                        .await;
+                }
+        }
+        
+        // Run until done and shutdown
+        if let Some(mut wk2) = worker2 {
+            join!(
+                async {wk2.run_until_done().await.unwrap()},
+                async {worker.run_until_done().await.unwrap()},
+            );
+        } else {
+            worker.run_until_done().await.unwrap();
+        }
+
+        // Now test shutdown
+        let shutdown_result = timeout(Duration::from_secs(2), async {
+            drain_pollers_and_shutdown(&core_worker).await;
+        })
+        .await;
+
+        assert!(
+            shutdown_result.is_ok(),
+            "Worker shutdown should not hang after processing tasks for {description}"
+        );
+
+        for event in starter.get_history().await.events {
+            eprintln!("Event: {:#?}", event.event_type());
+        }
     }
 }
