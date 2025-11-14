@@ -14,7 +14,6 @@ use crate::{
 };
 use futures_util::{stream, stream::StreamExt};
 use std::{cell::RefCell, time::Duration};
-use temporalio_common::worker::WorkerTaskType;
 use temporalio_common::{
     Worker,
     protos::{
@@ -30,7 +29,7 @@ use temporalio_common::{
         },
         test_utils::start_timer_cmd,
     },
-    worker::{PollerBehavior, worker_task_types},
+    worker::{PollerBehavior, WorkerTaskTypes},
 };
 use tokio::sync::{Barrier, watch};
 use tokio::time::timeout;
@@ -137,7 +136,7 @@ async fn can_shutdown_local_act_only_worker_when_act_polling() {
     let mh = MockPollCfg::from_resp_batches("fakeid", t, [1], mock);
     let mut mock = build_mock_pollers(mh);
     mock.worker_cfg(|w| {
-        w.task_types = worker_task_types::workflows();
+        w.task_types = WorkerTaskTypes::workflow_only();
         w.max_cached_workflows = 1;
     });
     let worker = mock_worker(mock);
@@ -374,28 +373,34 @@ async fn worker_shutdown_api(#[case] use_cache: bool, #[case] api_success: bool)
 #[tokio::test]
 async fn test_worker_type_shutdown_all_combinations() {
     let combinations = [
-        (worker_task_types::workflows(), "workflows only"),
-        (worker_task_types::activities(), "activities only"),
-        (worker_task_types::nexus(), "nexus only"),
+        (WorkerTaskTypes::workflow_only(), "workflows only"),
+        (WorkerTaskTypes::activity_only(), "activities only"),
+        (WorkerTaskTypes::nexus_only(), "nexus only"),
         (
-            [WorkerTaskType::Workflows, WorkerTaskType::Activities]
-                .into_iter()
-                .collect(),
+            WorkerTaskTypes {
+                enable_workflows: true,
+                enable_activities: true,
+                enable_nexus: false,
+            },
             "workflows + activities",
         ),
         (
-            [WorkerTaskType::Workflows, WorkerTaskType::Nexus]
-                .into_iter()
-                .collect(),
+            WorkerTaskTypes {
+                enable_workflows: true,
+                enable_activities: false,
+                enable_nexus: true,
+            },
             "workflows + nexus",
         ),
         (
-            [WorkerTaskType::Activities, WorkerTaskType::Nexus]
-                .into_iter()
-                .collect(),
+            WorkerTaskTypes {
+                enable_workflows: false,
+                enable_activities: true,
+                enable_nexus: true,
+            },
             "activities + nexus",
         ),
-        (worker_task_types::all(), "all types"),
+        (WorkerTaskTypes::all(), "all types"),
     ];
 
     for (task_types, description) in combinations {
