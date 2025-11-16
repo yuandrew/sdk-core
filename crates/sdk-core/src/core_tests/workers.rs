@@ -1,4 +1,3 @@
-use crate::telemetry::telemetry_init_fallback;
 use temporalio_common::protos::temporal::api::workflowservice::v1::RespondNexusTaskCompletedResponse;
 use crate::{
     PollError, prost_dur,
@@ -921,6 +920,185 @@ async fn test_task_type_activity_and_nexus() {
         worker.poll_nexus_task().await.unwrap_err(),
         PollError::ShutDown
     );
+    worker.shutdown().await;
+    worker.finalize_shutdown().await;
+}
+
+// Helper functions for creating consistent test data
+fn create_test_activity_task() -> PollActivityTaskQueueResponse {
+    PollActivityTaskQueueResponse {
+        task_token: b"act-task".to_vec(),
+        workflow_execution: Some(WorkflowExecution {
+            workflow_id: "test".to_string(),
+            run_id: "run-id".to_string(),
+        }),
+        activity_id: "activity".to_string(),
+        activity_type: Some(ActivityType {
+            name: "activity".to_string(),
+        }),
+        ..Default::default()
+    }
+}
+
+fn create_test_nexus_task() -> PollNexusTaskQueueResponse {
+    PollNexusTaskQueueResponse {
+        task_token: b"nex-task".to_vec(),
+        request: Some(NexusRequest {
+            header: Default::default(),
+            scheduled_time: None,
+            variant: Some(temporalio_common::protos::temporal::api::nexus::v1::request::Variant::StartOperation(
+                StartOperationRequest {
+                    service: "test-service".to_string(),
+                    operation: "test-operation".to_string(),
+                    request_id: "test-request-id".to_string(),
+                    callback: "".to_string(),
+                    payload: None,
+                    callback_header: Default::default(),
+                    links: vec![],
+                }
+            )),
+        }),
+        poller_scaling_decision: None,
+    }
+}
+
+fn create_test_nexus_completion(task_token: &[u8]) -> NexusTaskCompletion {
+    NexusTaskCompletion {
+        task_token: task_token.to_vec(),
+        status: Some(temporalio_common::protos::coresdk::nexus::nexus_task_completion::Status::Completed(
+            NexusResponse {
+                variant: Some(temporalio_common::protos::temporal::api::nexus::v1::response::Variant::StartOperation(
+                    StartOperationResponse {
+                        variant: Some(start_operation_response::Variant::SyncSuccess(
+                            start_operation_response::Sync {
+                                payload: None,
+                                links: vec![],
+                            }
+                        )),
+                    }
+                )),
+            }
+        )),
+    }
+}
+
+// Unified parameterized test for all task type combinations
+#[rstest::rstest]
+#[case::activity_only(false, true, false, "activity-only")]
+#[case::nexus_only(false, false, true, "nexus-only")]
+#[case::workflow_and_activity(true, true, false, "workflow-activity")]
+#[case::workflow_and_nexus(true, false, true, "workflow-nexus")]
+#[case::activity_and_nexus(false, true, true, "activity-nexus")]
+#[tokio::test]
+async fn test_task_type_combinations_unified(
+    #[case] enable_workflows: bool,
+    #[case] enable_activities: bool,
+    #[case] enable_nexus: bool,
+    #[case] queue_name: &str,
+) {
+    let mut client = mock_worker_client();
+
+    // Setup expectations based on enabled types
+    if enable_activities {
+        client
+            .expect_complete_activity_task()
+            .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
+    }
+    if enable_nexus {
+        client
+            .expect_complete_nexus_task()
+            .returning(|_, _| Ok(RespondNexusTaskCompletedResponse::default()));
+    }
+
+    // Build worker based on enabled task types
+    let mut mocks = if enable_workflows {
+        // When workflows are enabled, use build_mock_pollers as the base
+        let t = canned_histories::single_timer(queue_name);
+        let wf_cfg = MockPollCfg::from_resp_batches(queue_name, t, [1], client);
+        let mut mocks = build_mock_pollers(wf_cfg);
+        if enable_activities {
+            mocks.set_act_poller_from_resps(vec![QueueResponse::from(create_test_activity_task())]);
+        }
+        if enable_nexus {
+            mocks.set_nexus_poller_from_resps(vec![QueueResponse::from(create_test_nexus_task())]);
+        }
+        mocks
+    } else {
+        // When workflows are disabled, use from_client_with_custom
+        let activity_tasks = if enable_activities {
+            Some(vec![QueueResponse::from(create_test_activity_task())])
+        } else {
+            None
+        };
+        let nexus_tasks = if enable_nexus {
+            Some(vec![QueueResponse::from(create_test_nexus_task())])
+        } else {
+            None
+        };
+        MocksHolder::from_client_with_custom::<stream::Empty<_>, _, _>(client, None, activity_tasks, nexus_tasks)
+    };
+
+    mocks.worker_cfg(|w| {
+        w.task_queue = queue_name.to_string();
+        w.task_types = WorkerTaskTypes {
+            enable_workflows,
+            enable_activities,
+            enable_nexus,
+        };
+        w.skip_client_worker_set_check = true;
+    });
+    let worker = mock_worker(mocks);
+
+    if enable_workflows {
+        let activation = worker.poll_workflow_activation().await.unwrap();
+        worker
+            .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
+                activation.run_id.clone(),
+                vec![CompleteWorkflowExecution::default().into()],
+            ))
+            .await
+            .unwrap();
+    }
+
+    if enable_activities {
+        let activity_task = worker.poll_activity_task().await.unwrap();
+        worker
+            .complete_activity_task(ActivityTaskCompletion {
+                task_token: activity_task.task_token,
+                result: Some(ActivityExecutionResult::ok(vec![1].into())),
+            })
+            .await
+            .unwrap();
+    }
+
+    if enable_nexus {
+        let nexus_task = worker.poll_nexus_task().await.unwrap();
+        worker
+            .complete_nexus_task(create_test_nexus_completion(nexus_task.task_token()))
+            .await
+            .unwrap();
+    }
+
+    // Shutdown
+    worker.initiate_shutdown();
+    if enable_workflows {
+        assert_matches!(
+            worker.poll_workflow_activation().await.unwrap_err(),
+            PollError::ShutDown
+        );
+    }
+    if enable_activities {
+        assert_matches!(
+            worker.poll_activity_task().await.unwrap_err(),
+            PollError::ShutDown
+        );
+    }
+    if enable_nexus {
+        assert_matches!(
+            worker.poll_nexus_task().await.unwrap_err(),
+            PollError::ShutDown
+        );
+    }
     worker.shutdown().await;
     worker.finalize_shutdown().await;
 }

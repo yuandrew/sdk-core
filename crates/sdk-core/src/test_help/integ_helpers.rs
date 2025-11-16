@@ -344,7 +344,42 @@ impl MocksHolder {
         }
     }
 
-    // TODO from_client_custom, that allows for
+    /// Create a MocksHolder with custom combination of task pollers.
+    /// Allows any combination of workflow, activity, and nexus tasks.
+    pub fn from_client_with_custom<WFT, ACT, NEX>(
+        client: impl WorkerClient + 'static,
+        wft_stream: Option<WFT>,
+        activity_tasks: Option<ACT>,
+        nexus_tasks: Option<NEX>,
+    ) -> Self
+    where
+        WFT: Stream<Item = PollWorkflowTaskQueueResponse> + Send + 'static,
+        ACT: IntoIterator<Item = QueueResponse<PollActivityTaskQueueResponse>>,
+        <ACT as IntoIterator>::IntoIter: Send + 'static,
+        NEX: IntoIterator<Item = QueueResponse<PollNexusTaskQueueResponse>>,
+        <NEX as IntoIterator>::IntoIter: Send + 'static,
+    {
+        let wft_stream = wft_stream.map(|s| {
+            s.map(|r| Ok(r.try_into().expect("Mock responses must be valid work")))
+                .boxed()
+        });
+
+        let act_poller = activity_tasks.map(|tasks| mock_poller_from_resps(tasks));
+        let nexus_poller = nexus_tasks.map(|tasks| mock_poller_from_resps(tasks));
+
+        let mock_worker = MockWorkerInputs {
+            wft_stream,
+            act_poller,
+            nexus_poller,
+            config: test_worker_cfg().build().unwrap(),
+        };
+
+        Self {
+            client: Arc::new(client),
+            inputs: mock_worker,
+            outstanding_task_map: None,
+        }
+    }
 
     /// Uses the provided task responses and delivers them as quickly as possible when polled.
     /// This is only useful to test buffering, as typically you do not want to pretend that
