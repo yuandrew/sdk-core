@@ -232,6 +232,26 @@ impl MocksHolder {
         self.inputs.act_poller = Some(poller);
     }
 
+    /// Helper to create and set an activity poller from responses
+    pub(crate) fn set_act_poller_from_resps<ACT>(&mut self, act_tasks: ACT)
+    where
+        ACT: IntoIterator<Item = QueueResponse<PollActivityTaskQueueResponse>>,
+        <ACT as IntoIterator>::IntoIter: Send + 'static,
+    {
+        let act_poller = mock_poller_from_resps(act_tasks);
+        self.set_act_poller(act_poller);
+    }
+
+    /// Helper to create and set a nexus poller from responses
+    pub(crate) fn set_nexus_poller_from_resps<NEX>(&mut self, nexus_tasks: NEX)
+    where
+        NEX: IntoIterator<Item = QueueResponse<PollNexusTaskQueueResponse>>,
+        <NEX as IntoIterator>::IntoIter: Send + 'static,
+    {
+        let nexus_poller = mock_poller_from_resps(nexus_tasks);
+        self.inputs.nexus_poller = Some(nexus_poller);
+    }
+
     /// Can be used for tests that need to avoid auto-shutdown due to running out of mock responses
     pub fn make_wft_stream_interminable(&mut self) {
         let old_stream = std::mem::replace(&mut self.inputs.wft_stream, stream::pending().boxed());
