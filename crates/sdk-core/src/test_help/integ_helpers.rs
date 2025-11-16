@@ -301,6 +301,30 @@ impl MocksHolder {
         }
     }
 
+    /// Uses the provided list of tasks to create a mock poller with a randomly generated task queue
+    pub fn from_client_with_nexus<NEX>(
+        client: impl WorkerClient + 'static,
+        nexus_tasks: NEX,
+    ) -> Self
+    where
+        NEX: IntoIterator<Item = QueueResponse<PollNexusTaskQueueResponse>>,
+        <NEX as IntoIterator>::IntoIter: Send + 'static,
+    {
+        let wft_stream = stream::pending().boxed();
+        let mock_nexus_poller = mock_poller_from_resps(nexus_tasks);
+        let mock_worker = MockWorkerInputs {
+            wft_stream,
+            act_poller: None,
+            nexus_poller: Some(mock_nexus_poller),
+            config: test_worker_cfg().build().unwrap(),
+        };
+        Self {
+            client: Arc::new(client),
+            inputs: mock_worker,
+            outstanding_task_map: None,
+        }
+    }
+
     /// Uses the provided task responses and delivers them as quickly as possible when polled.
     /// This is only useful to test buffering, as typically you do not want to pretend that
     /// the server is delivering WFTs super fast for the same run.

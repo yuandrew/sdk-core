@@ -26,9 +26,10 @@ use temporalio_common::{
             workflow_completion::WorkflowActivationCompletion,
         },
         temporal::api::workflowservice::v1::{
-            PollWorkflowTaskQueueResponse, RespondWorkflowTaskCompletedResponse,
+            PollWorkflowTaskQueueResponse, PollNexusTaskQueueResponse, RespondWorkflowTaskCompletedResponse,
             ShutdownWorkerResponse,
         },
+        temporal::api::common::v1::{ActivityType, WorkflowExecution},
         test_utils::start_timer_cmd,
     },
     worker::{PollerBehavior, WorkerTaskTypes},
@@ -37,10 +38,10 @@ use tokio::sync::{Barrier, watch};
 use tokio::time::timeout;
 use temporalio_common::protos::coresdk::activity_result::ActivityExecutionResult;
 use temporalio_common::protos::coresdk::ActivityTaskCompletion;
-use temporalio_common::protos::coresdk::nexus::{nexus_task_completion, NexusTaskCompletion};
-use temporalio_common::protos::temporal::api::nexus::v1::{response, start_operation_response, StartOperationResponse};
+use temporalio_common::protos::coresdk::nexus::NexusTaskCompletion;
+use temporalio_common::protos::temporal::api::nexus::v1::{Request as NexusRequest, Response as NexusResponse, StartOperationRequest, StartOperationResponse, start_operation_response};
 use temporalio_common::protos::temporal::api::workflowservice::v1::{PollActivityTaskQueueResponse, RespondActivityTaskCompletedResponse};
-use crate::test_help::{drain_pollers_and_shutdown, QueueResponse};
+use crate::test_help::QueueResponse;
 
 #[tokio::test]
 async fn after_shutdown_of_worker_get_shutdown_err() {
@@ -533,6 +534,8 @@ async fn test_type_shutdown_with_tasks() {
                 .await.unwrap();
 
         }
+    }
+}
 
 #[tokio::test]
 async fn test_task_type_activity_only() {
@@ -602,6 +605,101 @@ async fn test_task_type_activity_only() {
 
     timeout(Duration::from_secs(5), async {
         tokio::join!(workflow_shutdown, activity_shutdown);
+    })
+        .await
+        .expect("workers failed to shutdown");
+}
+
+#[tokio::test]
+async fn test_task_type_nexus_only() {
+    let shared_queue = "shared-nexus-queue";
+
+    let t = canned_histories::single_timer("wf-only");
+    let wf_cfg = MockPollCfg::from_resp_batches("wf-only", t, [1], mock_worker_client());
+    let mut wf_mocks = build_mock_pollers(wf_cfg);
+    wf_mocks.worker_cfg(|w| {
+        w.task_queue = shared_queue.to_string();
+        w.task_types = WorkerTaskTypes::workflow_only();
+        w.skip_client_worker_set_check = true;
+    });
+    let workflow_worker = mock_worker(wf_mocks);
+
+    let mut nex_client = mock_worker_client();
+    nex_client
+        .expect_complete_nexus_task()
+        .returning(|_, _| Ok(RespondNexusTaskCompletedResponse::default()));
+    let nex_task = PollNexusTaskQueueResponse {
+        task_token: b"nex-task".to_vec(),
+        request: Some(NexusRequest {
+            header: Default::default(),
+            scheduled_time: None,
+            variant: Some(temporalio_common::protos::temporal::api::nexus::v1::request::Variant::StartOperation(
+                StartOperationRequest {
+                    service: "test-service".to_string(),
+                    operation: "test-operation".to_string(),
+                    request_id: "test-request-id".to_string(),
+                    callback: "".to_string(),
+                    payload: None,
+                    callback_header: Default::default(),
+                    links: vec![],
+                }
+            )),
+        }),
+        poller_scaling_decision: None,
+    };
+    let mut nex_mocks =
+        MocksHolder::from_client_with_nexus(nex_client, vec![QueueResponse::from(nex_task)]);
+    nex_mocks.worker_cfg(|w| {
+        w.task_queue = shared_queue.to_string();
+        w.task_types = WorkerTaskTypes::nexus_only();
+        w.skip_client_worker_set_check = true;
+    });
+    let nexus_worker = mock_worker(nex_mocks);
+
+    let activation = workflow_worker.poll_workflow_activation().await.unwrap();
+    workflow_worker
+        .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
+            activation.run_id.clone(),
+            vec![CompleteWorkflowExecution::default().into()],
+        ))
+        .await
+        .unwrap();
+
+    let nexus_task = nexus_worker.poll_nexus_task().await.unwrap();
+    nexus_worker
+        .complete_nexus_task(NexusTaskCompletion {
+            task_token: nexus_task.task_token().to_vec(),
+            status: Some(temporalio_common::protos::coresdk::nexus::nexus_task_completion::Status::Completed(
+                NexusResponse {
+                    variant: Some(temporalio_common::protos::temporal::api::nexus::v1::response::Variant::StartOperation(
+                        StartOperationResponse {
+                            variant: Some(start_operation_response::Variant::SyncSuccess(
+                                start_operation_response::Sync {
+                                    payload: None,
+                                    links: vec![],
+                                }
+                            )),
+                        }
+                    )),
+                }
+            )),
+        })
+        .await
+        .unwrap();
+
+    let workflow_shutdown = workflow_worker.drain_pollers_and_shutdown();
+    let nexus_shutdown = async move {
+        nexus_worker.initiate_shutdown();
+        assert_matches!(
+            nexus_worker.poll_nexus_task().await.unwrap_err(),
+            PollError::ShutDown
+        );
+        nexus_worker.shutdown().await;
+        nexus_worker.finalize_shutdown().await;
+    };
+
+    timeout(Duration::from_secs(5), async {
+        tokio::join!(workflow_shutdown, nexus_shutdown);
     })
         .await
         .expect("workers failed to shutdown");
