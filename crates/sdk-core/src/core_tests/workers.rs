@@ -982,37 +982,46 @@ fn create_test_nexus_completion(task_token: &[u8]) -> NexusTaskCompletion {
     }
 }
 
-// Unified parameterized test for all task type combinations
 #[rstest::rstest]
-#[case::activity_only(false, true, false, "activity-only")]
-#[case::nexus_only(false, false, true, "nexus-only")]
-#[case::workflow_and_activity(true, true, false, "workflow-activity")]
-#[case::workflow_and_nexus(true, false, true, "workflow-nexus")]
-#[case::activity_and_nexus(false, true, true, "activity-nexus")]
+// With tasks
+#[case::activity_only_with_task(false, true, false, true, "activity-only")]
+#[case::nexus_only_with_task(false, false, true, true, "nexus-only")]
+#[case::workflow_only_with_task(true, false, false, true, "workflow-only")]
+#[case::workflow_and_activity_with_task(true, true, false, true, "workflow-activity")]
+#[case::workflow_and_nexus_with_task(true, false, true, true, "workflow-nexus")]
+#[case::activity_and_nexus_with_task(false, true, true, true, "activity-nexus")]
+// Without tasks (idle worker shutdown)
+#[case::activity_only_idle(false, true, false, false, "activity-only-idle")]
+#[case::nexus_only_idle(false, false, true, false, "nexus-only-idle")]
+#[case::workflow_only_idle(true, false, false, false, "workflow-only-idle")]
+#[case::workflow_and_activity_idle(true, true, false, false, "workflow-activity-idle")]
+#[case::workflow_and_nexus_idle(true, false, true, false, "workflow-nexus-idle")]
+#[case::activity_and_nexus_idle(false, true, true, false, "activity-nexus-idle")]
 #[tokio::test]
 async fn test_task_type_combinations_unified(
     #[case] enable_workflows: bool,
     #[case] enable_activities: bool,
     #[case] enable_nexus: bool,
+    #[case] with_task: bool,
     #[case] queue_name: &str,
 ) {
     let mut client = mock_worker_client();
 
-    // Setup expectations based on enabled types
-    if enable_activities {
+    // Setup expectations based on enabled types (only if with_task is true)
+    if enable_activities && with_task {
         client
             .expect_complete_activity_task()
             .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
     }
-    if enable_nexus {
+    if enable_nexus && with_task {
         client
             .expect_complete_nexus_task()
             .returning(|_, _| Ok(RespondNexusTaskCompletedResponse::default()));
     }
 
     // Build worker based on enabled task types
-    let mut mocks = if enable_workflows {
-        // When workflows are enabled, use build_mock_pollers as the base
+    let mut mocks = if enable_workflows && with_task {
+        // When workflows are enabled AND we have tasks, use build_mock_pollers as the base
         let t = canned_histories::single_timer(queue_name);
         let wf_cfg = MockPollCfg::from_resp_batches(queue_name, t, [1], client);
         let mut mocks = build_mock_pollers(wf_cfg);
@@ -1024,18 +1033,24 @@ async fn test_task_type_combinations_unified(
         }
         mocks
     } else {
-        // When workflows are disabled, use from_client_with_custom
-        let activity_tasks = if enable_activities {
+        // When workflows are disabled OR idle (no tasks), use from_client_with_custom
+        // Provide workflow stream if workflows enabled (but no tasks in it)
+        let wft_stream = if enable_workflows {
+            Some(stream::empty())
+        } else {
+            None
+        };
+        let activity_tasks = if enable_activities && with_task {
             Some(vec![QueueResponse::from(create_test_activity_task())])
         } else {
             None
         };
-        let nexus_tasks = if enable_nexus {
+        let nexus_tasks = if enable_nexus && with_task {
             Some(vec![QueueResponse::from(create_test_nexus_task())])
         } else {
             None
         };
-        MocksHolder::from_client_with_custom::<stream::Empty<_>, _, _>(client, None, activity_tasks, nexus_tasks)
+        MocksHolder::from_client_with_custom(client, wft_stream, activity_tasks, nexus_tasks)
     };
 
     mocks.worker_cfg(|w| {
@@ -1049,37 +1064,40 @@ async fn test_task_type_combinations_unified(
     });
     let worker = mock_worker(mocks);
 
-    if enable_workflows {
-        let activation = worker.poll_workflow_activation().await.unwrap();
-        worker
-            .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
-                activation.run_id.clone(),
-                vec![CompleteWorkflowExecution::default().into()],
-            ))
-            .await
-            .unwrap();
+    // Poll and complete tasks ONLY if with_task is true
+    if with_task {
+        if enable_workflows {
+            let activation = worker.poll_workflow_activation().await.unwrap();
+            worker
+                .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
+                    activation.run_id.clone(),
+                    vec![CompleteWorkflowExecution::default().into()],
+                ))
+                .await
+                .unwrap();
+        }
+
+        if enable_activities {
+            let activity_task = worker.poll_activity_task().await.unwrap();
+            worker
+                .complete_activity_task(ActivityTaskCompletion {
+                    task_token: activity_task.task_token,
+                    result: Some(ActivityExecutionResult::ok(vec![1].into())),
+                })
+                .await
+                .unwrap();
+        }
+
+        if enable_nexus {
+            let nexus_task = worker.poll_nexus_task().await.unwrap();
+            worker
+                .complete_nexus_task(create_test_nexus_completion(nexus_task.task_token()))
+                .await
+                .unwrap();
+        }
     }
 
-    if enable_activities {
-        let activity_task = worker.poll_activity_task().await.unwrap();
-        worker
-            .complete_activity_task(ActivityTaskCompletion {
-                task_token: activity_task.task_token,
-                result: Some(ActivityExecutionResult::ok(vec![1].into())),
-            })
-            .await
-            .unwrap();
-    }
-
-    if enable_nexus {
-        let nexus_task = worker.poll_nexus_task().await.unwrap();
-        worker
-            .complete_nexus_task(create_test_nexus_completion(nexus_task.task_token()))
-            .await
-            .unwrap();
-    }
-
-    // Shutdown
+    // Shutdown (works whether tasks were processed or not)
     worker.initiate_shutdown();
     if enable_workflows {
         assert_matches!(
