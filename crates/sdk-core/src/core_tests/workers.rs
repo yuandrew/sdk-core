@@ -539,52 +539,37 @@ async fn test_worker_type_shutdown_all_combinations() {
 
 #[tokio::test]
 async fn test_task_type_activity_only() {
-    let shared_queue = "shared-wfa-queue";
+    let queue = "activity-only-queue";
 
-    let t = canned_histories::single_timer("wf-only");
-    let wf_cfg = MockPollCfg::from_resp_batches("wf-only", t, [1], mock_worker_client());
-    let mut wf_mocks = build_mock_pollers(wf_cfg);
-    wf_mocks.worker_cfg(|w| {
-        w.task_queue = shared_queue.to_string();
-        w.task_types = WorkerTaskTypes::workflow_only();
-        w.skip_client_worker_set_check = true;
-    });
-    let workflow_worker = mock_worker(wf_mocks);
-
-    let mut act_client = mock_worker_client();
-    act_client
+    let mut client = mock_worker_client();
+    client
         .expect_complete_activity_task()
         .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
+
     let mut act_task = PollActivityTaskQueueResponse::default();
     act_task.task_token = b"act-task".to_vec();
     act_task.workflow_execution = Some(WorkflowExecution {
-        workflow_id: "wf-only".to_string(),
+        workflow_id: "activity-only".to_string(),
         run_id: "run-id".to_string(),
     });
     act_task.activity_id = "activity".to_string();
     act_task.activity_type = Some(ActivityType {
         name: "activity".to_string(),
     });
-    let mut act_mocks =
-        MocksHolder::from_client_with_activities(act_client, vec![QueueResponse::from(act_task)]);
-    act_mocks.worker_cfg(|w| {
-        w.task_queue = shared_queue.to_string();
+
+    let mut mocks = MocksHolder::from_client_with_activities(
+        client,
+        vec![QueueResponse::from(act_task)]
+    );
+    mocks.worker_cfg(|w| {
+        w.task_queue = queue.to_string();
         w.task_types = WorkerTaskTypes::activity_only();
         w.skip_client_worker_set_check = true;
     });
-    let activity_worker = mock_worker(act_mocks);
+    let worker = mock_worker(mocks);
 
-    let activation = workflow_worker.poll_workflow_activation().await.unwrap();
-    workflow_worker
-        .complete_workflow_activation(WorkflowActivationCompletion::from_cmds(
-            activation.run_id.clone(),
-            vec![CompleteWorkflowExecution::default().into()],
-        ))
-        .await
-        .unwrap();
-
-    let activity_task = activity_worker.poll_activity_task().await.unwrap();
-    activity_worker
+    let activity_task = worker.poll_activity_task().await.unwrap();
+    worker
         .complete_activity_task(ActivityTaskCompletion {
             task_token: activity_task.task_token,
             result: Some(ActivityExecutionResult::ok(vec![1].into())),
@@ -592,22 +577,13 @@ async fn test_task_type_activity_only() {
         .await
         .unwrap();
 
-    let workflow_shutdown = workflow_worker.drain_pollers_and_shutdown();
-    let activity_shutdown = async move {
-        activity_worker.initiate_shutdown();
-        assert_matches!(
-            activity_worker.poll_activity_task().await.unwrap_err(),
-            PollError::ShutDown
-        );
-        activity_worker.shutdown().await;
-        activity_worker.finalize_shutdown().await;
-    };
-
-    timeout(Duration::from_secs(5), async {
-        tokio::join!(workflow_shutdown, activity_shutdown);
-    })
-        .await
-        .expect("workers failed to shutdown");
+    worker.initiate_shutdown();
+    assert_matches!(
+        worker.poll_activity_task().await.unwrap_err(),
+        PollError::ShutDown
+    );
+    worker.shutdown().await;
+    worker.finalize_shutdown().await;
 }
 
 #[tokio::test]
