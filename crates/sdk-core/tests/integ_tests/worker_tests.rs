@@ -962,7 +962,7 @@ async fn worker_type_shutdown_all_combinations() {
 }
 
 #[tokio::test]
-async fn test_type_shutdown_with_tasks() {
+async fn test_type_shutdown_with_tasks1() {
     let combinations = [
         (WorkerTaskTypes::workflow_only(), "workflows only"),
         (WorkerTaskTypes::activity_only(), "activities only"),

@@ -189,19 +189,19 @@ pub fn mock_worker(mocks: MocksHolder) -> Worker {
     } else {
         None
     };
+    let nexus_poller = if mocks.inputs.config.task_types.enable_nexus {
+        mocks.inputs.nexus_poller
+    } else {
+        None
+    };
     Worker::new_with_pollers(
         mocks.inputs.config,
         sticky_q,
         mocks.client,
         TaskPollers::Mocked {
-            wft_stream: Some(mocks.inputs.wft_stream),
+            wft_stream: mocks.inputs.wft_stream,
             act_poller,
-            nexus_poller: Some(
-                mocks
-                    .inputs
-                    .nexus_poller
-                    .unwrap_or_else(|| mock_poller_from_resps([])),
-            ),
+            nexus_poller,
         },
         None,
         None,
@@ -254,13 +254,14 @@ impl MocksHolder {
 
     /// Can be used for tests that need to avoid auto-shutdown due to running out of mock responses
     pub fn make_wft_stream_interminable(&mut self) {
-        let old_stream = std::mem::replace(&mut self.inputs.wft_stream, stream::pending().boxed());
-        self.inputs.wft_stream = old_stream.chain(stream::pending()).boxed();
+        if let Some(old_stream) = self.inputs.wft_stream.take() {
+            self.inputs.wft_stream = Some(old_stream.chain(stream::pending()).boxed());
+        }
     }
 }
 
 pub struct MockWorkerInputs {
-    pub(crate) wft_stream: BoxStream<'static, Result<ValidPollWFTQResponse, tonic::Status>>,
+    pub(crate) wft_stream: Option<BoxStream<'static, Result<ValidPollWFTQResponse, tonic::Status>>>,
     pub(crate) act_poller: Option<BoxedPoller<PollActivityTaskQueueResponse>>,
     pub(crate) nexus_poller: Option<BoxedPoller<PollNexusTaskQueueResponse>>,
     pub(crate) config: WorkerConfig,
@@ -277,7 +278,7 @@ impl MockWorkerInputs {
         wft_stream: BoxStream<'static, Result<ValidPollWFTQResponse, tonic::Status>>,
     ) -> Self {
         Self {
-            wft_stream,
+            wft_stream: Some(wft_stream),
             act_poller: None,
             nexus_poller: None,
             config: test_worker_cfg().build().unwrap(),
@@ -306,10 +307,9 @@ impl MocksHolder {
         ACT: IntoIterator<Item = QueueResponse<PollActivityTaskQueueResponse>>,
         <ACT as IntoIterator>::IntoIter: Send + 'static,
     {
-        let wft_stream = stream::pending().boxed();
         let mock_act_poller = mock_poller_from_resps(act_tasks);
         let mock_worker = MockWorkerInputs {
-            wft_stream,
+            wft_stream: None,
             act_poller: Some(mock_act_poller),
             nexus_poller: None,
             config: test_worker_cfg().build().unwrap(),
@@ -330,10 +330,9 @@ impl MocksHolder {
         NEX: IntoIterator<Item = QueueResponse<PollNexusTaskQueueResponse>>,
         <NEX as IntoIterator>::IntoIter: Send + 'static,
     {
-        let wft_stream = stream::pending().boxed();
         let mock_nexus_poller = mock_poller_from_resps(nexus_tasks);
         let mock_worker = MockWorkerInputs {
-            wft_stream,
+            wft_stream: None,
             act_poller: None,
             nexus_poller: Some(mock_nexus_poller),
             config: test_worker_cfg().build().unwrap(),
@@ -345,6 +344,8 @@ impl MocksHolder {
         }
     }
 
+    // TODO from_client_custom, that allows for
+
     /// Uses the provided task responses and delivers them as quickly as possible when polled.
     /// This is only useful to test buffering, as typically you do not want to pretend that
     /// the server is delivering WFTs super fast for the same run.
@@ -352,9 +353,9 @@ impl MocksHolder {
         client: impl WorkerClient + 'static,
         stream: impl Stream<Item = PollWorkflowTaskQueueResponse> + Send + 'static,
     ) -> Self {
-        let wft_stream = stream
+        let wft_stream = Some(stream
             .map(|r| Ok(r.try_into().expect("Mock responses must be valid work")))
-            .boxed();
+            .boxed());
         let mock_worker = MockWorkerInputs {
             wft_stream,
             act_poller: None,
